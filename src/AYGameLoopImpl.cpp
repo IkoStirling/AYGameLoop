@@ -1,6 +1,7 @@
 // AYGameLoopImpl.cpp - GameLoop 主类实现
 
 #include <AYGameLoopImpl.h>
+#include <ayevent/EventBus.h>
 #include <AYTask.h>
 #include <cstdio>
 
@@ -72,7 +73,7 @@ void GameLoop::shutdown() {
     }
 
     // 清空事件监听器
-    GAME_LOOP_EVENT_BUS.clear();
+    ayt::event::EventBus::instance().unsubscribeAll();
 
     _shutdownComplete = true;
     ::printf("[GameLoop] Shutdown complete\n");
@@ -164,14 +165,14 @@ void GameLoop::stop() {
 void GameLoop::pause() {
     _paused.store(true);
     GamePausedEvent event(_frameManager.getFrameCount());
-    GAME_LOOP_EVENT_BUS.emit(event);
+    ayt::event::EventBus::instance().emit(event);
     ::printf("[GameLoop] Paused\n");
 }
 
 void GameLoop::resume() {
     _paused.store(false);
     GameResumedEvent event(_frameManager.getFrameCount());
-    GAME_LOOP_EVENT_BUS.emit(event);
+    ayt::event::EventBus::instance().emit(event);
     ::printf("[GameLoop] Resumed\n");
 }
 
@@ -191,6 +192,12 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
         _sync.waitForRenderComplete();
     }
 
+    // Drain deferred events posted by the render thread (RenderFrameStart/End).
+    // Per AYEventSystem design §2.2, post is any-thread; pump must run on main.
+    // Doing this before beginFrame() keeps render-thread signals visible to
+    // listeners before the logic frame emits its own start/end events.
+    ayt::event::EventBus::instance().pump();
+
     if (fixedStepDelta) {
         _frameManager.beginFrameWithDelta(_frameManager.getFixedTimestep());
     } else {
@@ -202,13 +209,13 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     uint64_t frameCount = _frameManager.getFrameCount();
 
     LogicFrameStartEvent startEvent(frameCount, unscaledDeltaTime);
-    GAME_LOOP_EVENT_BUS.emit(startEvent);
+    ayt::event::EventBus::instance().emit(startEvent);
 
     processFixedUpdates();
     processVariableUpdates();
 
     LogicFrameEndEvent endEvent(frameCount, deltaTime);
-    GAME_LOOP_EVENT_BUS.emit(endEvent);
+    ayt::event::EventBus::instance().emit(endEvent);
 
     submitRenderCommands();
     if (_sync.isRenderThreadEnabled()) {

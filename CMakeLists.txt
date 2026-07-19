@@ -9,7 +9,6 @@ set(SOURCES
     src/AYFrameStats.cpp
     src/AYFrameInterpolator.cpp
     src/AYRenderThreadSync.cpp
-    src/AYGameLoopEventBus.cpp
     src/AYJobScheduler.cpp
 )
 
@@ -27,6 +26,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
     AYTime
     AYLog
     AYTask
+    AYEventSystem
 )
 
 

@@ -6,7 +6,7 @@
 #include <AYFrameManager.h>
 #include <AYRenderThreadSync.h>
 #include <AYGameLoopEvents.h>
-#include <AYGameLoopEventBus.h>
+#include <ayevent/EventBus.h>
 #include <AYJobScheduler.h>
 #include <vector>
 #include <atomic>
@@ -55,10 +55,12 @@ public:
     uint64_t onUpdate(UpdateCallback callback) override;
     void offUpdate(uint64_t listenerId) override;
 
-    // 事件订阅
+    // 事件订阅（转给 AYEventSystem 主单例，返回 ConnectionId ≡ uint64_t）
     template<typename EventType>
     uint64_t onGameEvent(std::function<void(EventType&)> listener) {
-        return GAME_LOOP_EVENT_BUS.onEvent(listener);
+        return ayt::event::EventBus::instance().subscribe<EventType>(
+            [l = std::move(listener)](const EventType& e) { l(const_cast<EventType&>(e)); }
+        );
     }
 
     // 渲染线程相关

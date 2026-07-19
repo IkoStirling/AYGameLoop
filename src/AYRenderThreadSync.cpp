@@ -1,7 +1,8 @@
 // RenderThreadSync.cpp - 渲染线程同步实现
 
 #include <AYRenderThreadSync.h>
-#include <AYGameLoopEventBus.h>
+#include <AYGameLoopEvents.h>
+#include <ayevent/EventBus.h>
 #include <cstdio>
 
 namespace ayt::game
@@ -102,9 +103,9 @@ void RenderThreadSync::renderThreadMain() {
 
         if (!_renderThreadRunning.load()) break;
 
-        // 发布渲染帧开始事件
+        // 发布渲染帧开始事件（render thread → post，让 main thread 在 pump 时分发）
         RenderFrameStartEvent startEvent(renderFrameCount);
-        GAME_LOOP_EVENT_BUS.emit(startEvent);
+        ayt::event::EventBus::instance().post(startEvent);
 
         if (_renderCallback) {
             _renderCallback();
@@ -112,7 +113,7 @@ void RenderThreadSync::renderThreadMain() {
 
         // 发布渲染帧结束事件
         RenderFrameEndEvent endEvent(renderFrameCount);
-        GAME_LOOP_EVENT_BUS.emit(endEvent);
+        ayt::event::EventBus::instance().post(endEvent);
 
         signalRenderComplete();
         renderFrameCount++;
