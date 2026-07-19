@@ -72,8 +72,14 @@ void GameLoop::shutdown() {
         _jobScheduler.shutdown();
     }
 
-    // 清空事件监听器
-    ayt::event::EventBus::instance().unsubscribeAll();
+    // NOTE: do NOT call EventBus::instance().unsubscribeAll() here.
+    // EventBus is a process-wide singleton that outlives GameLoop; its
+    // listeners may be owned by other modules. Calling unsubscribeAll()
+    // during GameLoop's static-deinit also races the EventBus singleton's
+    // own destructor ordering (Phase 4 lesson, see [[ay-event-system]]
+    // memory). Cleanup of per-GameLoop-instance listeners is the
+    // host application's responsibility — typically via ScopedConnection
+    // or an explicit shutdown hook in AYApplication.
 
     _shutdownComplete = true;
     ::printf("[GameLoop] Shutdown complete\n");

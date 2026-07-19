@@ -217,18 +217,16 @@ TEST_CASE(EventPriority_High) {
 
 TEST_SUITE_END
 
-// GameLoopEventBus suite — DISABLED (Phase 4, 2026-07-19):
+// GameLoopEventBus suite (Phase 4, 2026-07-19):
 //   AYGameLoop's GameLoopEventBus was migrated to AYEventSystem. The four
-//   test cases below crashed in MSVC debug when run from GameLoopTest.exe
-//   (SIGSEGV after MultipleSubscribers function return). Equivalent patterns
-//   in AYEventSystem_Tests (Test_EventBus.cpp) pass cleanly. Root cause not
-//   yet isolated — likely linker / static-init interaction between
-//   AYGameLoopTests's TEST_CASE registrars and AYEventSystem singleton
-//   destruction during process teardown. Re-enable once diagnosed.
-//   See [[ay-event-system]] memory "Phase 4 known issue".
+//   cases below verify the facade integration: singleton identity, typed
+//   subscribe + emit, multiple subscribers on one type, and unsubscribeAll
+//   dropping every listener. They use local ayt::event::EventBus instances
+//   for test isolation — the process-singleton EventBus::instance() is
+//   only touched in the Singleton case, which doesn't register any
+//   listeners.
 TEST_SUITE(GameLoopEventBus)
 
-#if 0  // DISABLED — see header comment above
 TEST_CASE(Singleton) {
     auto& bus1 = ayt::event::EventBus::instance();
     auto& bus2 = ayt::event::EventBus::instance();
@@ -282,7 +280,6 @@ TEST_CASE(Clear) {
     bus.emit(event);
     CHECK_INT_EQ(called, 0);
 }
-#endif  // DISABLED
 
 TEST_SUITE_END
 
