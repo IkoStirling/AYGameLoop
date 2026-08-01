@@ -14,10 +14,10 @@ FrameStatsCollector::FrameStatsCollector() {
 void FrameStatsCollector::update(float frameTimeMs) {
     _sampleCount++;
 
-    // 更新帧时间
-    _stats.frameTimeMs = frameTimeMs;
+    // Last frame time (not a stats aggregate).
+    _stats.lastFrameTimeMs = frameTimeMs;
 
-    // 更新最小/最大帧时间
+    // Min/max observed since last reset().
     if (_sampleCount == 1) {
         _stats.minFrameTimeMs = frameTimeMs;
         _stats.maxFrameTimeMs = frameTimeMs;
@@ -26,15 +26,12 @@ void FrameStatsCollector::update(float frameTimeMs) {
         _stats.maxFrameTimeMs = std::max(_stats.maxFrameTimeMs, frameTimeMs);
     }
 
-    // 更新累计帧时间（用于计算平均值）
     _stats.totalFrameTimeUs += static_cast<uint64_t>(frameTimeMs * 1000.0f);
 
-    // 计算平均帧时间
     if (_sampleCount > 0) {
         _stats.avgFrameTimeMs = static_cast<float>(_stats.totalFrameTimeUs) / (_sampleCount * 1000.0f);
     }
 
-    // 计算 FPS（基于平均帧时间）
     if (_stats.avgFrameTimeMs > 0.0f) {
         _stats.fps = 1000.0f / _stats.avgFrameTimeMs;
     }

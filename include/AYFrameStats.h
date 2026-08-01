@@ -7,10 +7,13 @@
 namespace ayt::game
 {
 
-// 帧统计信息
+// 帧统计信息（一次聚合后的快照）
+//
+// NOTE: `lastFrameTimeMs` holds the most-recently reported frame time only
+// (not a stats aggregate). For min/avg/max see the other fields.
 struct FrameStats {
     float fps = 0.0f;
-    float frameTimeMs = 0.0f;
+    float lastFrameTimeMs = 0.0f;   // last single frame's time, ms
     float minFrameTimeMs = 0.0f;
     float maxFrameTimeMs = 0.0f;
     float avgFrameTimeMs = 0.0f;
@@ -18,7 +21,7 @@ struct FrameStats {
     uint64_t totalFrameTimeUs = 0;  // 微秒累计
 };
 
-// 帧统计器
+// 帧统计器（main-thread only）
 class FrameStatsCollector {
 public:
     FrameStatsCollector();
@@ -26,23 +29,14 @@ public:
     // 更新统计（每帧调用）
     void update(float frameTimeMs);
 
-    // 获取当前统计
     const FrameStats& getStats() const { return _stats; }
 
-    // 重置统计
     void reset();
 
-    // 获取 FPS
-    float getFPS() const { return _stats.fps; }
-
-    // 获取平均帧时间（毫秒）
-    float getAvgFrameTimeMs() const { return _stats.avgFrameTimeMs; }
-
-    // 获取最小帧时间（毫秒）
-    float getMinFrameTimeMs() const { return _stats.minFrameTimeMs; }
-
-    // 获取最大帧时间（毫秒）
-    float getMaxFrameTimeMs() const { return _stats.maxFrameTimeMs; }
+    [[nodiscard]] float getFPS() const { return _stats.fps; }
+    [[nodiscard]] float getAvgFrameTimeMs() const { return _stats.avgFrameTimeMs; }
+    [[nodiscard]] float getMinFrameTimeMs() const { return _stats.minFrameTimeMs; }
+    [[nodiscard]] float getMaxFrameTimeMs() const { return _stats.maxFrameTimeMs; }
 
 private:
     FrameStats _stats;

@@ -3,6 +3,7 @@
 #include <AYGameLoopImpl.h>
 #include <ayevent/EventBus.h>
 #include <AYTask.h>
+#include <AYLog.h>
 #include <cstdio>
 
 namespace ayt::game
@@ -25,50 +26,51 @@ GameLoop& GameLoop::instance() {
 }
 
 bool GameLoop::initialize() {
-    ::printf("[GameLoop] Initializing...\n");
+    ayt::log::info("[GameLoop] Initializing...");
 
-    // 初始化帧管理器
-    // 默认设置
     _frameManager.setTargetFPS(60.0f);
     _frameManager.setFixedTimestep(1.0f / 60.0f);
     _frameManager.setTimeScale(1.0f);
 
-    // 初始化Job调度器
-    if (_parallelEnabled) {
+    if (_parallelEnabled.load()) {
         if (!_jobScheduler.initialize()) {
-            ::fprintf(stderr, "[GameLoop] Failed to initialize job scheduler\n");
+            ayt::log::error("[GameLoop] Failed to initialize job scheduler");
             return false;
         }
     }
 
-    ::printf("[GameLoop] Initialized successfully\n");
+    ayt::log::info("[GameLoop] Initialized successfully");
     return true;
 }
 
 void GameLoop::shutdown() {
-    if (_shutdownComplete) {
+    if (_shutdownComplete.load(std::memory_order_acquire)) {
         return;
     }
 
-    ::printf("[GameLoop] Shutting down...\n");
-
-    // 只在运行状态下调用 stop
-    bool expectedRunning = true;
-    if (_running.compare_exchange_strong(expectedRunning, false)) {
-        _shouldExit.store(true);
+    bool expected = false;
+    if (!_shutdownInProgress.compare_exchange_strong(expected, true)) {
+        return;
     }
 
-    if (_playSessionActive) {
-        _playSessionActive = false;
+    ayt::log::info("[GameLoop] Shutting down...");
+
+    // Stop request propagates to mainLoop.
+    _shouldExit.store(true);
+
+    if (_playSessionActive.load()) {
+        _playSessionActive.store(false);
         _frameManager.setNoLimitFPS(false);
     }
 
-    // 关闭所有子系统
     shutdownSubSystems();
+    // NOTE: clearAll() does NOT destroy subsystems — their lifetime extends
+    // to process exit. The registry only forgets the lookup keys. This
+    // prevents use-after-free when static-init registrars (REGISTER_SUBSYSTEM)
+    // tear down before GameLoop's static dtor runs.
     SubSystemRegistry::instance().clearAll();
 
-    // 关闭Job调度器
-    if (_parallelEnabled) {
+    if (_parallelEnabled.load()) {
         _jobScheduler.shutdown();
     }
 
@@ -76,65 +78,64 @@ void GameLoop::shutdown() {
     // EventBus is a process-wide singleton that outlives GameLoop; its
     // listeners may be owned by other modules. Calling unsubscribeAll()
     // during GameLoop's static-deinit also races the EventBus singleton's
-    // own destructor ordering (Phase 4 lesson, see [[ay-event-system]]
-    // memory). Cleanup of per-GameLoop-instance listeners is the
-    // host application's responsibility — typically via ScopedConnection
+    // own destructor ordering. Cleanup of per-GameLoop-instance listeners
+    // is the host application's responsibility — typically via ScopedConnection
     // or an explicit shutdown hook in AYApplication.
 
-    _shutdownComplete = true;
-    ::printf("[GameLoop] Shutdown complete\n");
+    _shutdownComplete.store(true, std::memory_order_release);
+    ayt::log::info("[GameLoop] Shutdown complete");
 }
 
 bool GameLoop::initializeSubSystems() {
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
     for (ISubSystem* system : systems) {
-        ::printf("[GameLoop] Initializing subsystem: %s\n", system->getName());
+        ayt::log::info("[GameLoop] Initializing subsystem: %s", system->getName());
         if (!system->initialize()) {
-            ::fprintf(stderr, "[GameLoop] Failed to initialize subsystem: %s\n", system->getName());
+            ayt::log::error("[GameLoop] Failed to initialize subsystem: %s", system->getName());
             return false;
         }
     }
 
-    _subSystemsRunning = true;
+    _subSystemsRunning.store(true);
     return true;
 }
 
 void GameLoop::shutdownSubSystems() {
-    if (!_subSystemsRunning) {
+    if (!_subSystemsRunning.load()) {
         return;
     }
 
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
-    // 逆序关闭
+    // Reverse-order teardown.
     for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
         ISubSystem* system = *it;
-        ::printf("[GameLoop] Shutting down subsystem: %s\n", system->getName());
+        ayt::log::info("[GameLoop] Shutting down subsystem: %s", system->getName());
         system->shutdown();
     }
 
-    _subSystemsRunning = false;
+    _subSystemsRunning.store(false);
 }
 
 void GameLoop::run() {
-    if (_playSessionActive) {
-        ::fprintf(stderr, "[GameLoop] run() blocked while editor play session is active\n");
+    if (_playSessionActive.load()) {
+        ayt::log::warn("[GameLoop] run() blocked while editor play session is active");
         return;
     }
 
     if (_running.load()) {
-        ::fprintf(stderr, "[GameLoop] Already running\n");
+        ayt::log::warn("[GameLoop] Already running");
         return;
     }
 
     if (!initialize()) {
-        ::fprintf(stderr, "[GameLoop] Failed to initialize\n");
+        ayt::log::error("[GameLoop] Failed to initialize");
         return;
     }
 
     if (!initializeSubSystems()) {
-        ::fprintf(stderr, "[GameLoop] Failed to initialize subsystems\n");
+        ayt::log::error("[GameLoop] Failed to initialize subsystems");
         return;
     }
 
@@ -142,49 +143,56 @@ void GameLoop::run() {
     _shouldExit.store(false);
     _paused.store(false);
 
-    // 如果启用了渲染线程，启动它
     if (_sync.isRenderThreadEnabled()) {
         _sync.startRenderThread();
-        // 等待渲染线程准备好（进入等待状态）
+        // Spin until render thread is parked on waitForLogicComplete().
+        // RenderThreadSync sets _renderThreadRunning BEFORE spawning, so
+        // this is a brief spin (typically <1ms).
         while (!_sync.isRenderThreadRunning()) {
-            ayt::Thread::sleep(0.001f);  // 1ms
+            ayt::Thread::sleep(0.001f);
         }
     }
 
-    ::printf("[GameLoop] Game loop started\n");
+    ayt::log::info("[GameLoop] Game loop started");
 
     mainLoop();
 
-    // 等待渲染线程结束
     _sync.stopRenderThread();
 
     _running.store(false);
-    ::printf("[GameLoop] Game loop exited\n");
+    ayt::log::info("[GameLoop] Game loop exited");
 }
 
 void GameLoop::stop() {
+    // Set the stop flag observable at the next frame top. Do NOT touch
+    // _running — mainLoop owns that transition on exit. Safe from any
+    // thread; main thread preferred.
     _shouldExit.store(true);
-    _running.store(false);
-    ::printf("[GameLoop] Stop requested\n");
+    GameStoppedEvent event(_frameManager.getFrameCount());
+    ayt::event::EventBus::instance().emit(event);
+    ayt::log::info("[GameLoop] Stop requested");
 }
 
 void GameLoop::pause() {
     _paused.store(true);
     GamePausedEvent event(_frameManager.getFrameCount());
     ayt::event::EventBus::instance().emit(event);
-    ::printf("[GameLoop] Paused\n");
+    ayt::log::info("[GameLoop] Paused");
 }
 
 void GameLoop::resume() {
     _paused.store(false);
     GameResumedEvent event(_frameManager.getFrameCount());
     ayt::event::EventBus::instance().emit(event);
-    ::printf("[GameLoop] Resumed\n");
+    ayt::log::info("[GameLoop] Resumed");
 }
 
 void GameLoop::mainLoop() {
     while (_running.load() && !_shouldExit.load()) {
         if (_paused.load()) {
+            // Drain render-thread-posted events while paused so consumers
+            // see RenderFrame{Start,End} even during pause.
+            ayt::event::EventBus::instance().pump();
             ayt::Thread::sleep(0.01f);
             continue;
         }
@@ -200,8 +208,6 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
 
     // Drain deferred events posted by the render thread (RenderFrameStart/End).
     // Per AYEventSystem design §2.2, post is any-thread; pump must run on main.
-    // Doing this before beginFrame() keeps render-thread signals visible to
-    // listeners before the logic frame emits its own start/end events.
     ayt::event::EventBus::instance().pump();
 
     if (fixedStepDelta) {
@@ -228,55 +234,55 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
         _sync.signalLogicComplete();
     }
 
-    if (!_playSessionActive) {
+    if (!_playSessionActive.load()) {
         _frameManager.limitFrameRate();
     }
 }
 
 bool GameLoop::preparePlaySession() {
-    if (_playSessionActive) {
+    if (_playSessionActive.load()) {
         return true;
     }
 
     if (_running.load()) {
-        ::fprintf(stderr, "[GameLoop] preparePlaySession blocked while run() is active\n");
+        ayt::log::warn("[GameLoop] preparePlaySession blocked while run() is active");
         return false;
     }
 
     if (!initialize()) {
-        ::fprintf(stderr, "[GameLoop] preparePlaySession initialize failed\n");
+        ayt::log::error("[GameLoop] preparePlaySession initialize failed");
         return false;
     }
 
     if (!initializeSubSystems()) {
-        ::fprintf(stderr, "[GameLoop] preparePlaySession subsystem init failed\n");
+        ayt::log::error("[GameLoop] preparePlaySession subsystem init failed");
         return false;
     }
 
-    _playSessionActive = true;
+    _playSessionActive.store(true);
     _running.store(true);
     _shouldExit.store(false);
     _paused.store(false);
     _frameManager.setNoLimitFPS(true);
-    ::printf("[GameLoop] Editor play session started\n");
+    ayt::log::info("[GameLoop] Editor play session started");
     return true;
 }
 
 void GameLoop::endPlaySession() {
-    if (!_playSessionActive) {
+    if (!_playSessionActive.load()) {
         return;
     }
 
     shutdownSubSystems();
-    _playSessionActive = false;
+    _playSessionActive.store(false);
     _running.store(false);
     _paused.store(false);
     _frameManager.setNoLimitFPS(false);
-    ::printf("[GameLoop] Editor play session ended\n");
+    ayt::log::info("[GameLoop] Editor play session ended");
 }
 
 void GameLoop::tickOnce() {
-    if (!_playSessionActive || _paused.load()) {
+    if (!_playSessionActive.load() || _paused.load()) {
         return;
     }
 
@@ -284,7 +290,7 @@ void GameLoop::tickOnce() {
 }
 
 void GameLoop::stepOnce() {
-    if (!_playSessionActive) {
+    if (!_playSessionActive.load()) {
         return;
     }
 
@@ -310,43 +316,131 @@ void GameLoop::processVariableUpdates() {
     float deltaTime = _frameManager.getDeltaTime();
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
-    if (_parallelEnabled && _jobScheduler.isInitialized()) {
-        // 并行执行模式：使用TaskGraph
-        auto graph = _jobScheduler.createGraph();
-        if (graph) {
-            ayt::task::ITaskGraph::INode* prevNode = nullptr;
-
-            for (ISubSystem* system : systems) {
-                auto& node = graph->emplace(
-                    ayt::task::makeTask([system, deltaTime]() { system->update(deltaTime); }),
-                    system->getName()
-                );
-
-                if (prevNode) {
-                    graph->depend(node, *prevNode);
-                }
-                prevNode = &node;
-            }
-
-            _jobScheduler.executeAndWait(graph);
-            delete graph;
-        } else {
-            // 回退到串行执行
-            for (ISubSystem* system : systems) {
-                system->update(deltaTime);
-            }
-        }
+    if (_parallelEnabled.load() && _jobScheduler.isInitialized()) {
+        auto layers = buildExecutionLayers();
+        runVariableUpdatesParallel(layers, deltaTime);
     } else {
-        // 串行执行模式
         for (ISubSystem* system : systems) {
             system->update(deltaTime);
         }
     }
 
-    // 调用注册的回调
     AY_LOCK_GUARD(_listenerMutex);
     for (const auto& listener : _updateListeners) {
         listener.callback(deltaTime);
+    }
+}
+
+// Build layer-by-layer DAG for parallel update.
+//
+// Layer 0 contains all subsystems with no unresolved dependencies.
+// Layer N+1 contains subsystems whose dependencies are all satisfied by
+// layers 0..N. Subsystems within a single layer run concurrently;
+// layers run serially.
+//
+// Dependencies come from the override map (set via the descriptor overload
+// of registerSubSystem) merged over each subsystem's getDescriptor().
+std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
+    auto systems = SubSystemRegistry::instance().getExecutionOrder();
+
+    // Effective descriptor for each registered system: override wins over getDescriptor().
+    std::unordered_map<std::string, std::vector<std::string>> deps;
+    for (ISubSystem* s : systems) {
+        std::vector<std::string> merged;
+        // Start with the subsystem's own dependencies.
+        for (const char* d : s->getDescriptor().dependencies) {
+            if (d) merged.emplace_back(d);
+        }
+        // Apply override (if any) — overrides REPLACE the subsystem's own list.
+        auto overrideList = SubSystemRegistry::instance().getDependencyOverride(s->getName());
+        if (overrideList) {
+            merged.clear();
+            for (const char* d : *overrideList) {
+                if (d) merged.emplace_back(d);
+            }
+        }
+        deps[s->getName()] = std::move(merged);
+    }
+
+    std::unordered_map<std::string, int> inDegree;
+    std::unordered_map<std::string, std::vector<std::string>> adj;
+    for (ISubSystem* s : systems) {
+        inDegree[s->getName()] = 0;
+    }
+    for (ISubSystem* s : systems) {
+        const std::string name = s->getName();
+        for (const auto& d : deps[name]) {
+            auto it = inDegree.find(d);
+            if (it == inDegree.end()) continue; // dependency not registered; skip
+            adj[d].push_back(name);
+            inDegree[name]++;
+        }
+    }
+
+    std::vector<std::vector<ISubSystem*>> layers;
+    std::unordered_map<std::string, ISubSystem*> byName;
+    for (ISubSystem* s : systems) byName[s->getName()] = s;
+
+    auto zeroDegree = [&](const std::unordered_map<std::string, int>& deg) {
+        std::vector<ISubSystem*> layer;
+        for (ISubSystem* s : systems) {
+            if (deg.at(s->getName()) == 0) layer.push_back(s);
+        }
+        return layer;
+    };
+
+    auto current = zeroDegree(inDegree);
+    while (!current.empty()) {
+        // Sort within layer by descending basePriority (higher first).
+        std::sort(current.begin(), current.end(), [](ISubSystem* a, ISubSystem* b) {
+            return a->getDescriptor().basePriority > b->getDescriptor().basePriority;
+        });
+        layers.push_back(current);
+
+        std::unordered_map<std::string, int> nextDeg = inDegree;
+        for (ISubSystem* s : current) {
+            const std::string name = s->getName();
+            for (const auto& nb : adj[name]) {
+                nextDeg[nb]--;
+            }
+        }
+        // Remove current layer from in-degree.
+        for (ISubSystem* s : current) {
+            nextDeg[s->getName()] = -1; // marker
+        }
+        current = zeroDegree(nextDeg);
+        inDegree = std::move(nextDeg);
+    }
+
+    return layers;
+}
+
+// Run layers in series; within each layer, fan out subsystems to a TaskGraph
+// that runs them in parallel (no intra-layer dependencies).
+void GameLoop::runVariableUpdatesParallel(
+    const std::vector<std::vector<ISubSystem*>>& layers, float dt) {
+    for (const auto& layer : layers) {
+        if (layer.empty()) continue;
+
+        auto* graph = _jobScheduler.createGraph();
+        if (!graph) {
+            // Fallback: serial for this layer.
+            for (ISubSystem* s : layer) s->update(dt);
+            continue;
+        }
+
+        // Emplace one node per subsystem, NO intra-layer dependencies → all parallel.
+        std::vector<ayt::task::ITaskGraph::INode*> prevLayerNodes;
+        for (ISubSystem* s : layer) {
+            auto& node = graph->emplace(
+                ayt::task::makeTask([s, dt]() { s->update(dt); }),
+                s->getName()
+            );
+            (void)node;
+        }
+
+        _jobScheduler.executeAndWait(graph);
+        delete graph;
     }
 }
 
@@ -369,12 +463,18 @@ void GameLoop::setTimeScale(float scale) {
 }
 
 void GameLoop::setNoLimitFPS(bool noLimit) {
-    _noLimitFPS = noLimit;
+    _noLimitFPS.store(noLimit);
     _frameManager.setNoLimitFPS(noLimit);
 }
 
 void GameLoop::registerSubSystem(ISubSystem* system) {
     SubSystemRegistry::instance().registerSubSystem(system);
+}
+
+void GameLoop::registerSubSystem(ISubSystem* system,
+                                 std::vector<const char*> dependencies,
+                                 int32_t priority) {
+    SubSystemRegistry::instance().registerSubSystem(system, std::move(dependencies), priority);
 }
 
 void GameLoop::unregisterSubSystem(const char* name) {
@@ -406,7 +506,12 @@ void GameLoop::setRenderCallback(RenderThreadSync::RenderThreadCallback callback
 }
 
 void GameLoop::setParallelEnabled(bool enabled) {
-    _parallelEnabled = enabled;
+    _parallelEnabled.store(enabled);
+    if (!enabled) {
+        _jobScheduler.shutdown();
+    } else if (!_jobScheduler.isInitialized()) {
+        _jobScheduler.initialize();
+    }
 }
 
 } // namespace ayt::game

@@ -185,8 +185,9 @@ SmoothDeltaTime::SmoothDeltaTime() {
 }
 
 void SmoothDeltaTime::setWindowSize(size_t size) {
-    _windowSize = size;
-    _history.resize(size, 0.0f);
+    // Clamp to >= 1 to prevent division by zero in add().
+    _windowSize = size > 0 ? size : 1;
+    _history.resize(_windowSize, 0.0f);
     _index = 0;
 }
 

@@ -6,25 +6,28 @@
 #include <thread>
 #include <cstdio>
 
+#if defined(_WIN32)
+    #include <windows.h>
+#endif
+
 namespace ayt::game
 {
 
-// 获取高精度时间（微秒精度）
+// High-resolution wall clock (microseconds).
 static double getCurrentTimeUs() {
     return static_cast<double>(ayt::performanceNowUs());
 }
 
-// 获取高精度时间（秒）
 static double getCurrentTime() {
     return getCurrentTimeUs() * 1e-6;
 }
 
-// 高精度睡眠
+// High-precision sleep. Uses Win32 waitable timer on Windows, clock_nanosleep
+// on Linux, std::this_thread::sleep_for as fallback.
 #if defined(_WIN32)
 static void sleepHighPrecision(double seconds) {
     if (seconds <= 0.0) return;
 
-    // 转换秒为百纳秒
     LARGE_INTEGER dueTime;
     dueTime.QuadPart = static_cast<LONGLONG>(seconds * 10000000.0);
 
@@ -34,7 +37,6 @@ static void sleepHighPrecision(double seconds) {
         WaitForSingleObject(timer, INFINITE);
         CloseHandle(timer);
     } else {
-        // 回退到普通 sleep
         std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
     }
 }
@@ -58,7 +60,6 @@ FrameManager::FrameManager()
     , _timeScale(1.0f)
     , _elapsedTime(0.0f)
     , _frameCount(0)
-    , _renderFrameCount(0)
     , _lastTime(0.0)
     , _accumulator(0.0)
     , _frameInterval(1.0 / 60.0)
@@ -84,12 +85,13 @@ void FrameManager::beginFrame() {
     double elapsed = currentTime - _lastTime;
     _lastTime = currentTime;
 
-    // 限制最大 delta time，防止卡顿后的跳帧
+    // Cap to prevent tunnelling after long stalls. _lastTime was already
+    // advanced above, so this only affects the reported value, not the
+    // timeline (next frame sees real wall-clock delta).
     if (elapsed > 0.25) {
         elapsed = 0.25;
     }
 
-    // 添加到平滑 deltaTime 计算器
     float elapsedSec = static_cast<float>(elapsed);
     _rawDeltaTime = elapsedSec;
     _smoothDeltaTime.add(elapsedSec);
@@ -97,7 +99,6 @@ void FrameManager::beginFrame() {
     _elapsedTime += elapsedSec;
     _accumulator += elapsed;
 
-    // 更新性能统计
     float frameTimeMs = elapsedSec * 1000.0f;
     _frameStats.update(frameTimeMs);
 
@@ -120,26 +121,19 @@ void FrameManager::beginFrameWithDelta(float deltaSeconds) {
 }
 
 float FrameManager::getInterpolationFactor() const {
-    // 插值因子：accumulator / fixedDt 的余数部分
-    // 表示当前固定时间步内已过去的时间比例
+    // Accumulator remainder within the current fixed step = how far into
+    // the step we are. Clamped to [0, 1).
     double fixedDtSeconds = _fixedDt;
     double t = _accumulator / fixedDtSeconds;
     return static_cast<float>(t - std::floor(t));
 }
 
 int FrameManager::getFixedUpdateCount() const {
-    // 计算累积时间内需要执行的固定更新次数
     double fixedDtSeconds = _fixedDt;
     int count = static_cast<int>(std::floor(_accumulator / fixedDtSeconds));
 
-    // 限制每次循环最多执行的固定更新次数，防止死锁
+    // Cap per-frame fixed steps to avoid death-spiral after stalls.
     return count > 8 ? 8 : count;
-}
-
-bool FrameManager::shouldRender() const {
-    // 简单策略：每帧都渲染
-    // 可以在低帧率时实现帧跳过
-    return true;
 }
 
 void FrameManager::limitFrameRate() {
@@ -151,37 +145,32 @@ void FrameManager::limitFrameRate() {
     double sleepTime = targetTime - currentTime;
 
     if (sleepTime <= 0.0) {
-        // 已经落后，跟踪调整
+        // Already behind; resync to wall clock to avoid run-away accumulation.
         _lastTime = currentTime;
         return;
     }
 
     if (_preciseSleep) {
-        // 精确睡眠 + 忙等待
         if (sleepTime > _busyWaitThreshold) {
-            // 超过阈值，先精确睡眠大部分时间
             double sleepSeconds = sleepTime - _busyWaitThreshold;
             sleepHighPrecision(sleepSeconds);
             currentTime = getCurrentTime();
             sleepTime = targetTime - currentTime;
         }
 
-        // 忙等待剩余时间（微秒级精度）
+        // Busy-wait remainder.
         while (sleepTime > 0.0) {
             currentTime = getCurrentTime();
             sleepTime = targetTime - currentTime;
         }
     } else {
-        // 普通睡眠
         if (sleepTime > 0.0) {
             std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime));
         }
     }
 
-    // 重新同步
     currentTime = getCurrentTime();
     if (currentTime > targetTime + _frameInterval) {
-        // 严重落后，重新同步
         _lastTime = currentTime;
     } else {
         _lastTime = targetTime;
@@ -190,7 +179,6 @@ void FrameManager::limitFrameRate() {
 
 void FrameManager::reset() {
     _frameCount = 0;
-    _renderFrameCount = 0;
     _elapsedTime = 0.0f;
     _accumulator = 0.0;
     _lastTime = getCurrentTime();

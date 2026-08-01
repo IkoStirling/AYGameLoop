@@ -2,12 +2,13 @@
 
 #include <AYJobScheduler.h>
 #include <AYTask.h>
+#include <AYLog.h>
 #include <cstdio>
 
 namespace ayt::game
 {
 
-JobScheduler::JobScheduler() : _initialized(false), _scheduler(nullptr) {
+JobScheduler::JobScheduler() : _initialized(false), _scheduler(nullptr), _workerHint(0) {
 }
 
 JobScheduler::~JobScheduler() {
@@ -16,14 +17,16 @@ JobScheduler::~JobScheduler() {
 
 bool JobScheduler::initialize(int workerCount) {
     if (_initialized) {
-        ::fprintf(stderr, "[JobScheduler] Already initialized\n");
+        ayt::log::warn("[JobScheduler] Already initialized");
         return true;
     }
 
+    _workerHint = workerCount;
     _scheduler = &ayt::task::ITaskScheduler::defaultScheduler();
     _initialized = true;
 
-    ::printf("[JobScheduler] Initialized with default scheduler\n");
+    ayt::log::info("[JobScheduler] Initialized with default scheduler (hint=%d, actual=%zu workers)",
+                 _workerHint, _scheduler->numThreads());
     return true;
 }
 
@@ -32,12 +35,12 @@ void JobScheduler::shutdown() {
 
     _initialized = false;
     _scheduler = nullptr;
-    ::printf("[JobScheduler] Shutdown\n");
+    ayt::log::info("[JobScheduler] Shutdown");
 }
 
 TaskGraphHandle JobScheduler::createGraph() {
     if (!_initialized) {
-        ::fprintf(stderr, "[JobScheduler] Not initialized\n");
+        ayt::log::error("[JobScheduler] Not initialized");
         return nullptr;
     }
     return new ayt::task::TaskGraph();
@@ -45,7 +48,7 @@ TaskGraphHandle JobScheduler::createGraph() {
 
 void JobScheduler::executeAndWait(TaskGraphHandle graph) {
     if (!_initialized || !graph || !_scheduler) {
-        ::fprintf(stderr, "[JobScheduler] Not initialized or invalid graph\n");
+        ayt::log::error("[JobScheduler] Not initialized or invalid graph");
         return;
     }
     graph->executeAndWait(*_scheduler);

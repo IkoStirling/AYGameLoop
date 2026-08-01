@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION  3.20)
 
-project(AYGameLoopTest)
+project(AYGameLoop_Test)
 
 set(SOURCES
     TestMain.cpp
@@ -28,3 +28,5 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>: /W4 /wd4200>
     $<$<CXX_COMPILER_ID:GNU,Clang>: -Wall -Wextra -Wpedantic>
 )
+
+ay_configure_test_tmpdir(${PROJECT_NAME})

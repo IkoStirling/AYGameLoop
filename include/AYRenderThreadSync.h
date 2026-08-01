@@ -27,14 +27,13 @@ public:
 
     // 是否启用渲染线程
     void setRenderThreadEnabled(bool enabled);
-    bool isRenderThreadEnabled() const { return _renderThreadEnabled; }
+    [[nodiscard]] bool isRenderThreadEnabled() const { return _renderThreadEnabled; }
 
     // 启动/停止渲染线程
     void startRenderThread();
     void stopRenderThread();
 
-    // 渲染线程是否在运行
-    bool isRenderThreadRunning() const { return _renderThreadRunning.load(); }
+    [[nodiscard]] bool isRenderThreadRunning() const { return _renderThreadRunning.load(); }
 
     using RenderThreadCallback = std::function<void()>;
     void setRenderCallback(RenderThreadCallback callback);
@@ -48,7 +47,11 @@ private:
     std::unique_ptr<ayt::Thread> _renderThread;
     RenderThreadCallback _renderCallback;
 
-    // 信号量替代品（使用条件变量模拟）
+    // Semaphore-via-condvar. POSIX requires notify under the same mutex
+    // as the wait predicate, otherwise the waiter may miss the signal
+    // during the window between releasing the mutex inside wait() and
+    // entering the wait queue. Both signalLogicComplete and
+    // signalRenderComplete therefore take the corresponding mutex.
     ayt::Mutex _logicMutex;
     ayt::Mutex _renderMutex;
     ayt::ConditionVariable _logicCond;

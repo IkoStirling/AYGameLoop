@@ -228,36 +228,30 @@ private:
 
 ### 2.5 Job 并行 (AYTask)
 
-AYTask 的 TaskGraph 支持 DAG 并行：
+AYTask 的 TaskGraph 支持 DAG 并行。AYGameLoop 采用 **layer-by-layer DAG**
+策略：每个 layer 内的子系统并发执行，layer 间串行。
 
 ```cpp
-void GameLoop::buildJobGraph() {
-    TaskGraph graph;
-    
-    // 物理和动画可以并行（无依赖）
-    auto& physicsTask = graph.emplace(
-        makeTask([this]() { _physics->fixedUpdate(_fixedDt); }),
-        "Physics"
-    );
-    
-    auto& animTask = graph.emplace(
-        makeTask([this]() { _animation->update(_scaledDt); }),
-        "Animation"
-    );
-    
-    // 渲染依赖物理和动画完成
-    auto& renderTask = graph.emplace(
-        makeTask([this]() { _renderer->execute(); }),
-        "Render"
-    );
-    
-    graph.depend(renderTask, physicsTask);
-    graph.depend(renderTask, animTask);
-    
-    // TaskScheduler 并行调度
-    graph.executeAndWait(_scheduler);
-}
+// 由 GameLoop::buildExecutionLayers() + runVariableUpdatesParallel() 实现
+//
+// 例如：注册 5 个子系统，依赖图：
+//
+//   Render ──┐
+//            ├──► Composite ──► Output
+//   Physics ─┘
+//   Audio ──────────► Output
+//
+// → Layer 0: { Render, Audio }          (并发)
+// → Layer 1: { Composite }              (依赖 Layer 0 全部)
+// → Layer 2: { Output }                 (依赖 Composite)
+//
+// Layer 内的 subsystem->update 在同一个 TaskGraph 内并行（无 intra-layer 边）；
+// Layer 间通过在下一层所有节点上 depend 上一层所有节点实现串行。
 ```
+
+**约束**：layer 内并发的子系统 `update()` 必须**无共享状态依赖**，否则会
+race。设计原则：**互相独立的子系统放同一 layer**；有数据依赖的子系统
+放在后续 layer。
 
 ---
 
@@ -554,6 +548,14 @@ class IGameLoop {
 public:
     virtual ~IGameLoop() = default;
 
+    // Threading contract (see §8.5):
+    //   - run / tickOnce / stepOnce / preparePlaySession / endPlaySession
+    //     and per-frame accessors (getDeltaTime, getFrameCount, ...) are
+    //     **main-thread only**.
+    //   - stop / pause / resume are any-thread safe (atomic flag).
+    //   - registerSubSystem / onUpdate / offUpdate are mutex-protected and
+    //     any-thread safe.
+
     // === 生命周期 ===
     virtual bool initialize() = 0;
     virtual void shutdown() = 0;
@@ -563,7 +565,11 @@ public:
     virtual void stop() = 0;
     virtual void pause() = 0;
     virtual void resume() = 0;
-    virtual void tickOnce() = 0;  // 手动步进一帧（编辑器/回放用）
+    virtual bool preparePlaySession() = 0;  // editor / replay entry
+    virtual void endPlaySession() = 0;
+    virtual void tickOnce() = 0;            // drive from host message loop
+    virtual void stepOnce() = 0;            // single fixed-step frame
+    virtual bool isPlaySessionActive() const = 0;
 
     // === 配置 ===
     virtual void setTargetFPS(float fps) = 0;
@@ -572,9 +578,9 @@ public:
     virtual void setNoLimitFPS(bool noLimit) = 0;
 
     // === 时间查询 ===
-    virtual float getDeltaTime() const = 0;                  // 受 timeScale 影响
-    virtual float getUnscaledDeltaTime() const = 0;         // 不受 timeScale 影响
-    virtual float getRealDeltaTime() const = 0;             // 真实时间
+    virtual float getDeltaTime() const = 0;
+    virtual float getUnscaledDeltaTime() const = 0;
+    virtual float getRealDeltaTime() const = 0;
     virtual float getElapsedTime() const = 0;
     virtual uint64_t getFrameCount() const = 0;
     virtual float getInterpolationFactor() const = 0;
@@ -584,13 +590,25 @@ public:
     virtual float getFrameTimeMS() const = 0;
 
     // === 子系统注册 ===
+    // 1-arg form: descriptor from subsystem's getDescriptor().
     virtual void registerSubSystem(ISubSystem* system) = 0;
+    // 3-arg form: dependencies and priority OVERRIDE the descriptor.
+    // Used by REGISTER_SUBSYSTEM macro.
+    virtual void registerSubSystem(ISubSystem* system,
+                                   std::vector<const char*> dependencies,
+                                   int32_t priority) = 0;
     virtual void unregisterSubSystem(const char* name) = 0;
 
     // === 回调 ===
     using UpdateCallback = std::function<void(float deltaTime)>;
     virtual uint64_t onUpdate(UpdateCallback callback) = 0;
     virtual void offUpdate(uint64_t listenerId) = 0;
+
+    // === Render thread + parallel execution ===
+    virtual void setRenderThreadEnabled(bool enabled) = 0;
+    virtual void setRenderCallback(std::function<void()> callback) = 0;
+    virtual void setParallelEnabled(bool enabled) = 0;
+    virtual bool isParallelEnabled() const = 0;
 };
 ```
 
@@ -1008,6 +1026,82 @@ TimeType timeType = TimeType::Scaled;
 
 - `std::function<std::unique_ptr<ISubSystem>()>>` → `std::function<std::unique_ptr<ISubSystem>() > >`（空格）
 - `Clock` 类型别名在 `beginFrame()` 中使用 `Clock::now()` 计算 `_realDeltaTime`
+
+### 8.5 Threading contract (v0.x cleanup)
+
+IGameLoop 的方法按线程归属分三档：
+
+| 方法 | 线程 |
+|---|---|
+| `run / tickOnce / stepOnce / preparePlaySession / endPlaySession` | main only |
+| `stop / pause / resume` | any thread（atomic flag，下一帧顶部观测） |
+| `registerSubSystem / unregister / onUpdate / offUpdate` | any thread（mutex） |
+| `getDeltaTime / getFrameCount / getCurrentFPS / …` | main only |
+
+`stop()` **不再触碰 `_running`**——`_running` 是「mainLoop 在跑」状态，
+由 `run()` 进入和退出 mainLoop 时维护。`stop()` 只 set `_shouldExit`，
+并在主线程下一次 emit `GameStoppedEvent`。
+
+### 8.6 Parallel update strategy (v0.x cleanup)
+
+`setParallelEnabled(true)` 启用 **layer-by-layer DAG 调度**：
+
+- `buildExecutionLayers()` 把 `_executionOrder` 按 effective dependencies
+  分层（layer 0 = 无依赖；layer N+1 = 依赖仅落在 layer ≤N）
+- `runVariableUpdatesParallel(layers, dt)` 在每个 layer 内 f
+  所有 subsystem→update 到同一个 TaskGraph，layer 间串行
+- 旧实现把所有 subsystem 串成 `depend(node, prev)` 单链 → 实际上还是
+  串行；新实现真正并发
+
+**用户责任**：layer 内并发的子系统 `update()` 必须无共享状态依赖；
+否则需自行同步（如 `std::mutex`）。
+
+### 8.7 Phase 7 cleanup (v0.x cleanup)
+
+- **3 个孤儿 header 删除**：`include/FrameManager.h`、
+  `include/FrameStats.h`、`include/RenderThreadSync.h`——grep 全工程
+  0 命中，无外部代码 include。
+- **`_ownedSystems` 字段删除**：从未赋值。
+- **`shouldRender()` 方法删除**：永远返回 true，从未调用。
+- **`ParallelExecutor` 类删除**：全工程 0 调用方。
+- **`FrameStats::frameTimeMs` 重命名为 `lastFrameTimeMs`**：字段语义
+  是「最近一帧」，不是统计聚合——**breaking change**，外部若有引用
+  需同步更新（grep 已确认仅 AYGameLoop 内引用）。
+- **`REGISTER_SUBSYSTEM` 宏修复**：
+  - `(a)` `deps / priority` 形参现已转发到 `registerSubSystem` 的 3-arg
+    overload（之前静默丢弃）
+  - `(b)` `__LINE__` 现通过两层 `AY_CONCAT_INDIRECT` 展开（之前
+    因 `##` 拼接不展开，identifier 字面是 `RegisterSubsystem_Foo___LINE__`）
+  - `(c)` 显式 `#include <type_traits>`
+  - 详见 `IAYGameLoop.h` 头注释
+- **`SubSystemRegistry::clearAll()` 改为只清 map 不析构**：
+  避免 `GameLoop` 静态 dtor 与静态 `REGISTER_SUBSYSTEM` 之间的析构顺序
+  race（析构顺序参见 §21 SIOF）。
+- **`SubSystemRegistry::topologicalSort()` 循环依赖改为拒绝执行**：
+  之前返回 partial order 静默失败；现在返回空 vector + AYT_LOG_ERROR。
+- **`SubSystemRegistry::topologicalSort()` O(N²) → O(N log N)**：
+  改用 `std::priority_queue`（按 effectivePriority 比较）。
+- **`RenderThreadSync::signal{Logic,Render}Complete` 改为持锁 notify**：
+  满足 POSIX condvar「notify 与 wait predicate 用同一 mutex」约束。
+- **`FrameManager::beginFrame()` 0.25s cap 不重置 `_lastTime`**：
+  cap 只影响上报的 delta / smoothed 值，时间轴继续走 wall clock
+  （避免下次 beginFrame 出现大跳跃）。
+- **`AYFrameInterpolator` 注释更新**：明确 interpolator 是 first-order
+  low-pass filter 朝 `target` 逼近，**不是** frame-state lerp(prev, curr, alpha)；
+  对应 frame interpolation 需要单独的 (prev, curr) helper。
+- **`SmoothDeltaTime::setWindowSize` clamp ≥ 1**：避免 `add()` 中 `% 0`。
+
+### 8.8 设计权衡
+
+- **`setRenderCallback` / `setParallelEnabled` 已加入 IGameLoop 接口**（之前
+  只在 GameLoop 派生类上）。原因：保持 IGameLoop 的 thin facade 性质，
+  不让用户必须 downcast 到 GameLoop。
+- **`_renderFrameCount` 字段已删除**：之前没有任何 getter，render-thread
+  内部 counter 没意义——`RenderFrame{Start,End}Event` 现携带
+  `FrameManager::getFrameCount()` 的值（统一用 logic frame count）。
+- **`stop()` 不再发 `GameStoppedEvent` 当 _running=false 时**：只 set
+  flag + emit event；如果当前没在 run，也照发 event（让 host 可观测
+  stop request）——这是设计选择，区别于 `pause/resume` 的语义。
 
 ---
 

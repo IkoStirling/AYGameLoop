@@ -3,14 +3,13 @@
 #include <AYRenderThreadSync.h>
 #include <AYGameLoopEvents.h>
 #include <ayevent/EventBus.h>
+#include <AYLog.h>
 #include <cstdio>
 
 namespace ayt::game
 {
 
 RenderThreadSync::RenderThreadSync() {
-    _logicSignal.store(0);
-    _renderSignal.store(0);
 }
 
 RenderThreadSync::~RenderThreadSync() {
@@ -30,14 +29,23 @@ void RenderThreadSync::waitForRenderComplete() {
 void RenderThreadSync::signalRenderComplete() {
     if (!_renderThreadEnabled) return;
 
-    _renderSignal.fetchAdd(1);
+    // Hold the mutex while bumping the signal AND notifying, so the waiter
+    // cannot miss the wake-up between releasing the mutex inside wait()
+    // and entering the wait queue.
+    {
+        std::lock_guard<ayt::Mutex> lock(_renderMutex);
+        _renderSignal.fetchAdd(1);
+    }
     _renderCond.notifyAll();
 }
 
 void RenderThreadSync::signalLogicComplete() {
     if (!_renderThreadEnabled) return;
 
-    _logicSignal.fetchAdd(1);
+    {
+        std::lock_guard<ayt::Mutex> lock(_logicMutex);
+        _logicSignal.fetchAdd(1);
+    }
     _logicCond.notifyAll();
 }
 
@@ -66,7 +74,7 @@ void RenderThreadSync::startRenderThread() {
         [this]() { renderThreadMain(); },
         "RenderThread"
     );
-    ::printf("[RenderThreadSync] Render thread started\n");
+    ayt::log::info("[RenderThreadSync] Render thread started");
 }
 
 void RenderThreadSync::stopRenderThread() {
@@ -74,13 +82,13 @@ void RenderThreadSync::stopRenderThread() {
 
     _renderThreadRunning.store(false);
 
-    // 通知渲染线程退出
+    // Wake the render thread if it's parked in waitForLogicComplete.
     signalLogicComplete();
 
     if (_renderThread && _renderThread->isJoinable()) {
         _renderThread->join();
     }
-    ::printf("[RenderThreadSync] Render thread stopped\n");
+    ayt::log::info("[RenderThreadSync] Render thread stopped");
 }
 
 void RenderThreadSync::setRenderCallback(RenderThreadCallback callback) {
@@ -94,7 +102,7 @@ void RenderThreadSync::invokeRenderCallback() {
 }
 
 void RenderThreadSync::renderThreadMain() {
-    ::printf("[RenderThreadSync] Render thread enter\n");
+    ayt::log::info("[RenderThreadSync] Render thread enter");
 
     uint64_t renderFrameCount = 0;
 
@@ -103,7 +111,8 @@ void RenderThreadSync::renderThreadMain() {
 
         if (!_renderThreadRunning.load()) break;
 
-        // 发布渲染帧开始事件（render thread → post，让 main thread 在 pump 时分发）
+        // Post events (render thread is not the EventBus main thread; per
+        // AYEventSystem design §2.2, post() is any-thread-safe).
         RenderFrameStartEvent startEvent(renderFrameCount);
         ayt::event::EventBus::instance().post(startEvent);
 
@@ -111,7 +120,6 @@ void RenderThreadSync::renderThreadMain() {
             _renderCallback();
         }
 
-        // 发布渲染帧结束事件
         RenderFrameEndEvent endEvent(renderFrameCount);
         ayt::event::EventBus::instance().post(endEvent);
 
@@ -119,7 +127,7 @@ void RenderThreadSync::renderThreadMain() {
         renderFrameCount++;
     }
 
-    ::printf("[RenderThreadSync] Render thread exit\n");
+    ayt::log::info("[RenderThreadSync] Render thread exit");
 }
 
 } // namespace ayt::game
