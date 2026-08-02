@@ -1,5 +1,12 @@
 # AYGameLoop Design
 
+## 0. Reading guide
+
+| Audience | Read |
+|----------|------|
+| All engineers adding SubSystems / gameplay systems | [`docs/sim-present-time.md`](docs/sim-present-time.md) — **Sim vs Present CR 纪律（现在就遵守）** |
+| Lockstep / bit-exact replay (later) | [`ENGINE-DETERMINISM-ARCHITECTURE.md`](../../ENGINE-DETERMINISM-ARCHITECTURE.md) |
+
 ## 1. 概述
 
 AYGameLoop 是 AY Engine 的**游戏循环中枢**，负责：
