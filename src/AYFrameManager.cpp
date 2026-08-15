@@ -1,7 +1,7 @@
 // FrameManager.cpp - 帧率/时间管理实现
 
-#include <AYFrameManager.h>
-#include <AYCoreTime.h>
+#include <AYGameLoop/FrameManager.h>
+#include <AYCore/CoreTime.h>
 #include <cmath>
 #include <thread>
 #include <cstdio>

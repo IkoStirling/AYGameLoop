@@ -1,5 +1,5 @@
 #pragma once
-// AYGameLoopImpl.h - GameLoop 主类实现
+// AYGameLoop/GameLoopImpl.h - GameLoop 主类实现
 //
 // Threading contract (see IGameLoop for the public side):
 //   - All member functions are main-thread only EXCEPT:
@@ -9,13 +9,13 @@
 //   - _running / _shouldExit / _paused are std::atomic; all other state
 //     is main-thread only (no synchronization needed).
 
-#include <IAYGameLoop.h>
-#include <AYSubSystemRegistry.h>
-#include <AYFrameManager.h>
-#include <AYRenderThreadSync.h>
-#include <AYJobScheduler.h>
-#include <AYGameLoopEvents.h>
-#include <ayevent/EventBus.h>
+#include <AYGameLoop/IGameLoop.h>
+#include <AYGameLoop/SubSystemRegistry.h>
+#include <AYGameLoop/FrameManager.h>
+#include <AYGameLoop/RenderThreadSync.h>
+#include <AYGameLoop/JobScheduler.h>
+#include <AYGameLoop/GameLoopEvents.h>
+#include <AYEventSystem/EventBus.h>
 #include <vector>
 #include <atomic>
 #include <functional>

@@ -1,6 +1,6 @@
 // AYSubSystemRegistry.cpp - 子系统注册表实现
 
-#include <AYSubSystemRegistry.h>
+#include <AYGameLoop/SubSystemRegistry.h>
 #include <AYLog.h>
 #include <queue>
 #include <cstdio>

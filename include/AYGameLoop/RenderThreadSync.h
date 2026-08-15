@@ -1,5 +1,5 @@
 #pragma once
-// AYRenderThreadSync.h - 渲染线程同步
+// AYGameLoop/RenderThreadSync.h - 渲染线程同步
 
 #include <AYCore.h>
 #include <functional>

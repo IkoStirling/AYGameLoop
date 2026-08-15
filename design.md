@@ -927,13 +927,13 @@ AYGameLoop/
 │   └── ISubSystem.h           # 子系统接口
 │
 ├── include/    
-│   ├── AYGameLoopImpl.h         # GameLoop 主类
-│   ├── AYSubSystemRegistry.h    # 子系统注册表
+│   ├── AYGameLoop/GameLoopImpl.h         # GameLoop 主类
+│   ├── AYGameLoop/SubSystemRegistry.h    # 子系统注册表
 │   ├── AYSubSystemDescriptor.h   # 子系统描述符
-│   ├── AYFrameManager.h         # 时间/帧率/统计管理
-│   ├── AYFrameInterpolator.h    # 帧插值
-│   ├── AYRenderThreadSync.h     # 线程同步
-│   └── AYGameLoopEvents.h       # 循环事件定义
+│   ├── AYGameLoop/FrameManager.h         # 时间/帧率/统计管理
+│   ├── AYGameLoop/FrameInterpolator.h    # 帧插值
+│   ├── AYGameLoop/RenderThreadSync.h     # 线程同步
+│   └── AYGameLoop/GameLoopEvents.h       # 循环事件定义
 │
 └── src/
     ├── AYGameLoopImpl.cpp
@@ -1065,8 +1065,8 @@ IGameLoop 的方法按线程归属分三档：
 
 ### 8.7 Phase 7 cleanup (v0.x cleanup)
 
-- **3 个孤儿 header 删除**：`include/FrameManager.h`、
-  `include/FrameStats.h`、`include/RenderThreadSync.h`——grep 全工程
+- **3 个孤儿 header 删除**：`include/AYGameLoop/FrameManager.h`、
+  `include/AYGameLoop/FrameStats.h`、`include/AYGameLoop/RenderThreadSync.h`——grep 全工程
   0 命中，无外部代码 include。
 - **`_ownedSystems` 字段删除**：从未赋值。
 - **`shouldRender()` 方法删除**：永远返回 true，从未调用。

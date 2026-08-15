@@ -1,5 +1,5 @@
 #pragma once
-// AYFrameStats.h - 帧率/性能统计
+// AYGameLoop/FrameStats.h - 帧率/性能统计
 
 #include <AYCore.h>
 #include <cstdint>

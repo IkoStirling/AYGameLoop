@@ -1,9 +1,9 @@
 #pragma once
-// AYFrameManager.h - 帧率/时间管理
+// AYGameLoop/FrameManager.h - 帧率/时间管理
 
 #include <AYCore.h>
-#include <AYFrameStats.h>
-#include <AYFrameInterpolator.h>
+#include <AYGameLoop/FrameStats.h>
+#include <AYGameLoop/FrameInterpolator.h>
 #include <cstdint>
 
 namespace ayt::game

@@ -1,8 +1,8 @@
 // AYGameLoopImpl.cpp - GameLoop 主类实现
 
-#include <AYGameLoopImpl.h>
-#include <AYGameLoopEvents.h>
-#include <ayevent/EventBus.h>
+#include <AYGameLoop/GameLoopImpl.h>
+#include <AYGameLoop/GameLoopEvents.h>
+#include <AYEventSystem/EventBus.h>
 #include <AYTask.h>
 #include <AYLog.h>
 #include <cstdio>

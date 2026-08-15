@@ -1,8 +1,8 @@
 #pragma once
 // AYGameLoop.h - 游戏循环主入口
 
-#include <IAYGameLoop.h>
-#include <AYGameLoopImpl.h>
+#include <AYGameLoop/IGameLoop.h>
+#include <AYGameLoop/GameLoopImpl.h>
 
 namespace ayt::game
 {

@@ -1,5 +1,5 @@
 #pragma once
-// AYFrameInterpolator.h - 帧插值器
+// AYGameLoop/FrameInterpolator.h - 帧插值器
 
 #include <AYCore.h>
 #include <cstdint>

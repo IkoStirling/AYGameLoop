@@ -1,8 +1,8 @@
 // RenderThreadSync.cpp - 渲染线程同步实现
 
-#include <AYRenderThreadSync.h>
-#include <AYGameLoopEvents.h>
-#include <ayevent/EventBus.h>
+#include <AYGameLoop/RenderThreadSync.h>
+#include <AYGameLoop/GameLoopEvents.h>
+#include <AYEventSystem/EventBus.h>
 #include <AYLog.h>
 #include <cstdio>
 

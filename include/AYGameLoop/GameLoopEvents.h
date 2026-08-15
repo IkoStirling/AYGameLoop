@@ -1,12 +1,12 @@
 #pragma once
-// AYGameLoopEvents.h - 游戏循环事件定义
+// AYGameLoop/GameLoopEvents.h - 游戏循环事件定义
 //
 // Phase 4 (2026-07-19): migrated from local IGameLoopEvent / GameLoopEventBus
 // to AYEventSystem. Events are plain structs with hand-assigned kTypeId and
 // kPriority. The EventBus dispatches by EventTypeId and drains deferred events
 // in priority order (Critical → Low). See AYEventSystem design.md §3-§4.
 
-#include <ayevent/EventPriority.h>
+#include <AYEventSystem/EventPriority.h>
 #include <cstdint>
 
 namespace ayt::game

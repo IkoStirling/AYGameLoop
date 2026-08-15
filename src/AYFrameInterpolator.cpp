@@ -1,6 +1,6 @@
 // AYFrameInterpolator.cpp - 帧插值器实现
 
-#include <AYFrameInterpolator.h>
+#include <AYGameLoop/FrameInterpolator.h>
 #include <algorithm>
 #include <cmath>
 

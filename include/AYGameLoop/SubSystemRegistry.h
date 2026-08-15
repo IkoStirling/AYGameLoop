@@ -1,8 +1,8 @@
 #pragma once
-// AYSubSystemRegistry.h - 子系统注册表，支持依赖排序
+// AYGameLoop/SubSystemRegistry.h - 子系统注册表，支持依赖排序
 
 #include <AYCore.h>
-#include <IAYGameLoop.h>
+#include <AYGameLoop/IGameLoop.h>
 #include <unordered_map>
 #include <vector>
 #include <string>

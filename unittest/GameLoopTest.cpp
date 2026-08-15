@@ -1,8 +1,8 @@
 #include <AYGameLoop.h>
-#include <ayevent/EventBus.h>
-#include <AYJobScheduler.h>
-#include <AYFrameInterpolator.h>
-#include <AYSubSystemRegistry.h>
+#include <AYEventSystem/EventBus.h>
+#include <AYGameLoop/JobScheduler.h>
+#include <AYGameLoop/FrameInterpolator.h>
+#include <AYGameLoop/SubSystemRegistry.h>
 #include <AYCore.h>
 #include <AYTest.h>
 #include <cstring>
