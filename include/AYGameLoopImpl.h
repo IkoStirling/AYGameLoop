@@ -57,6 +57,7 @@ public:
     [[nodiscard]] float getInterpolationFactor() const override { return _frameManager.getInterpolationFactor(); }
     [[nodiscard]] float getElapsedTime() const override { return _frameManager.getElapsedTime(); }
     [[nodiscard]] uint64_t getFrameCount() const override { return _frameManager.getFrameCount(); }
+    [[nodiscard]] uint64_t getSimTick() const override { return _simTick; }
 
     [[nodiscard]] float getCurrentFPS() const override { return _frameManager.getFrameStats().fps; }
     [[nodiscard]] float getFrameTimeMS() const override { return _frameManager.getFrameStats().avgFrameTimeMs; }
@@ -120,6 +121,7 @@ private:
 
     FrameManager _frameManager;
     RenderThreadSync _sync;
+    uint64_t _simTick = 0;
 
     std::atomic<bool> _running{false};
     std::atomic<bool> _paused{false};

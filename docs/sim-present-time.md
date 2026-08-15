@@ -83,13 +83,12 @@ PR / design review 必须能回答：
 
 ## 5. 以后再加什么（不要现在做）
 
-| 以后 | 现在不要 |
-|------|----------|
-| `ISimClock` / 公开 `simTick` API | 各模块私自累加第二套逻辑钟 |
-| DET fixed-point Sim 世界 | 全局替换 `FVector3` |
+| 以后 | 现在 |
+|------|------|
+| DET fixed-point Sim 世界 / `ISimClock` 完整抽象 | **已有** `SimTickEvent` + `IGameLoop::getSimTick()` 作为共享时间锚点 |
 | Replay / Lockstep 会话 | 为“以后可能联网”重写移动 |
 
-当 Scene / Save / Network / Replay 需要同一时间锚点时，再在 GameLoop 上露出 `simTick` + `FrameContext` 即可；本文件的分类表仍然适用。
+Scene / Save / Network / Replay 订阅 `ayt::game::SimTickEvent`（每 fixed 步一次）即可对齐；分类表仍然适用。
 
 ---
 

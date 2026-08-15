@@ -1,6 +1,7 @@
 // AYGameLoopImpl.cpp - GameLoop 主类实现
 
 #include <AYGameLoopImpl.h>
+#include <AYGameLoopEvents.h>
 #include <ayevent/EventBus.h>
 #include <AYTask.h>
 #include <AYLog.h>
@@ -304,8 +305,13 @@ void GameLoop::processFixedUpdates() {
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
     int fixedUpdateCount = _frameManager.getFixedUpdateCount();
     float fixedDt = _frameManager.getFixedTimestep();
+    const uint64_t frameCount = _frameManager.getFrameCount();
 
     for (int i = 0; i < fixedUpdateCount; ++i) {
+        ++_simTick;
+        SimTickEvent tickEvent(_simTick, fixedDt, frameCount);
+        ayt::event::EventBus::instance().emit(tickEvent);
+
         for (ISubSystem* system : systems) {
             system->fixedUpdate(fixedDt);
         }

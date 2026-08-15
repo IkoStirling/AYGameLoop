@@ -100,4 +100,22 @@ struct GameStoppedEvent {
         : frameCount(frame) {}
 };
 
+// -----------------------------------------------------------------------------
+// Sim tick (Normal — once per fixedUpdate step; shared time anchor)
+// -----------------------------------------------------------------------------
+struct SimTickEvent {
+    static constexpr uint32_t kTypeId = 8;
+    static constexpr ayt::event::EventPriority kPriority = ayt::event::EventPriority::Normal;
+
+    /// Monotonic Sim tick count (increments once per fixed step, including
+    /// catch-up steps within a single display frame).
+    uint64_t simTick = 0;
+    float fixedDeltaTime = 0.0f;
+    uint64_t frameCount = 0;
+
+    SimTickEvent() = default;
+    SimTickEvent(uint64_t tick, float fixedDt, uint64_t frame)
+        : simTick(tick), fixedDeltaTime(fixedDt), frameCount(frame) {}
+};
+
 } // namespace ayt::game

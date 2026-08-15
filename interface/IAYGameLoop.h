@@ -83,6 +83,11 @@ public:
     [[nodiscard]] virtual float getElapsedTime() const = 0;
     [[nodiscard]] virtual uint64_t getFrameCount() const = 0;
 
+    /// Monotonic Sim tick count (increments once per fixedUpdate step).
+    /// Shared time anchor for Scene / Save / Network / Replay subscribers of
+    /// `SimTickEvent` (see docs/sim-present-time.md §5).
+    [[nodiscard]] virtual uint64_t getSimTick() const = 0;
+
     [[nodiscard]] virtual float getCurrentFPS() const = 0;
     [[nodiscard]] virtual float getFrameTimeMS() const = 0;
 
