@@ -4,7 +4,7 @@
 #include <AYCore.h>
 #include <functional>
 #include <memory>
-#include <aytask/TaskGraph.h>
+#include <AYTask/TaskGraph.h>
 
 namespace ayt::task
 {
