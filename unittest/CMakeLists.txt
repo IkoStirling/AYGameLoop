@@ -29,4 +29,4 @@ target_compile_options(${PROJECT_NAME} PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>: -Wall -Wextra -Wpedantic>
 )
 
-ay_configure_test_tmpdir(${PROJECT_NAME})
+ay_add_test(${PROJECT_NAME})
