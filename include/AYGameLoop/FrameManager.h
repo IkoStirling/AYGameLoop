@@ -45,6 +45,12 @@ public:
 
     [[nodiscard]] int getFixedUpdateCount() const;
 
+    // Consume fixed steps after they have been simulated. If the per-frame
+    // safety cap was hit, discard whole-step backlog while preserving the
+    // fractional remainder; otherwise the loop would remain pinned at the
+    // cap forever after one long stall.
+    void consumeFixedUpdates(int count);
+
     [[nodiscard]] float getScaledDeltaTime() const { return getUnscaledDeltaTime() * _timeScale; }
 
     // 精确睡眠 + 忙等待限制帧率

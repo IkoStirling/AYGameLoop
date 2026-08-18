@@ -56,8 +56,12 @@ private:
     ayt::Mutex _renderMutex;
     ayt::ConditionVariable _logicCond;
     ayt::ConditionVariable _renderCond;
-    ayt::AtomicInt _logicSignal{0};
-    ayt::AtomicInt _renderSignal{0};
+    // Counting-semaphore style handshake. A completion/request remains
+    // observable even if its waiter arrives after the notification.
+    int _logicRequested = 0;
+    int _logicConsumed = 0;
+    int _renderCompleted = 0;
+    int _renderConsumed = 0;
 };
 
 } // namespace ayt::game

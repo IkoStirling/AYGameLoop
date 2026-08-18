@@ -136,6 +136,20 @@ int FrameManager::getFixedUpdateCount() const {
     return count > 8 ? 8 : count;
 }
 
+void FrameManager::consumeFixedUpdates(int count) {
+    if (count <= 0) return;
+
+    const double fixedDtSeconds = static_cast<double>(_fixedDt);
+    _accumulator = std::max(0.0, _accumulator - fixedDtSeconds * count);
+
+    // A count of eight means the catch-up guard may have truncated the
+    // requested work. Drop only complete overdue steps and retain the
+    // interpolation remainder.
+    if (count == 8 && _accumulator >= fixedDtSeconds) {
+        _accumulator = std::fmod(_accumulator, fixedDtSeconds);
+    }
+}
+
 void FrameManager::limitFrameRate() {
     if (_noLimitFPS) return;
 

@@ -3,7 +3,7 @@
 //
 // Threading contract (see IGameLoop for the public side):
 //   - All member functions are main-thread only EXCEPT:
-//       * stop() / pause() / resume()        (any thread; sets atomic + emits event)
+//       * stop() / pause() / resume()        (any thread; sets atomic + posts event)
 //       * onUpdate() / offUpdate()           (mutex-protected; any thread)
 //       * registerSubSystem() / unregister   (mutex-protected; any thread)
 //   - _running / _shouldExit / _paused are std::atomic; all other state
@@ -106,7 +106,8 @@ private:
     // Each layer's subsystems run concurrently; a subsystem in layer N+1
     // depends on every subsystem in layer N (its declared dependencies).
     std::vector<std::vector<ISubSystem*>> buildExecutionLayers() const;
-    void runVariableUpdatesParallel(const std::vector<std::vector<ISubSystem*>>& layers, float dt);
+    void runVariableUpdatesParallel(const std::vector<std::vector<ISubSystem*>>& layers);
+    [[nodiscard]] float deltaTimeFor(const ISubSystem& system) const;
 
     bool initializeSubSystems();
     void shutdownSubSystems();
@@ -121,6 +122,7 @@ private:
 
     FrameManager _frameManager;
     RenderThreadSync _sync;
+    bool _renderFrameInFlight = false;
     uint64_t _simTick = 0;
 
     std::atomic<bool> _running{false};

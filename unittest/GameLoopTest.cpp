@@ -186,6 +186,29 @@ TEST_CASE(BeginFrameWithDelta) {
     CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.016f, 0.001f);
 }
 
+TEST_CASE(FixedAccumulatorIsConsumed) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.beginFrameWithDelta(0.01f);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 1);
+    manager.consumeFixedUpdates(1);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+
+    manager.beginFrameWithDelta(0.01f);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 1);
+}
+
+TEST_CASE(FixedCatchUpCapDropsWholeStepBacklog) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.beginFrameWithDelta(0.25f);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 8);
+    manager.consumeFixedUpdates(8);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+    CHECK_TRUE(manager.getInterpolationFactor() >= 0.0f);
+    CHECK_TRUE(manager.getInterpolationFactor() < 1.0f);
+}
+
 TEST_CASE(InterpolationFactor_ZeroOnFirstFrame) {
     FrameManager manager;
     manager.setFixedTimestep(1.0f / 60.0f);
@@ -223,6 +246,20 @@ TEST_CASE(StartStopThread) {
     CHECK_FALSE(sync.isRenderThreadRunning());
 }
 
+TEST_CASE(CompletionBeforeWaitIsRemembered) {
+    RenderThreadSync sync;
+    sync.setRenderThreadEnabled(true);
+    sync.setRenderCallback([]() {});
+    sync.startRenderThread();
+    sync.signalLogicComplete();
+
+    // Let the render thread finish before the main-thread wait begins.
+    ayt::Thread::sleep(0.01f);
+    sync.waitForRenderComplete();
+    CHECK_TRUE(true);
+    sync.stopRenderThread();
+}
+
 TEST_CASE(SignalWakesWaiter) {
     RenderThreadSync sync;
     sync.setRenderThreadEnabled(true);
@@ -235,9 +272,10 @@ TEST_CASE(SignalWakesWaiter) {
     });
 
     sync.startRenderThread();
-    // The render thread itself may consume waitForLogicComplete; we want
-    // to verify waiter unblocks when we signal.
+    // There are two consumers here (the render thread and this waiter), so
+    // publish one request token for each.
     ayt::Thread::sleep(0.01f);
+    sync.signalLogicComplete();
     sync.signalLogicComplete();
 
     // Bounded wait for the waiter.

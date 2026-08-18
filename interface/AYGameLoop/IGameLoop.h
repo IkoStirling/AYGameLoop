@@ -60,7 +60,7 @@ public:
     virtual void shutdown() = 0;
 
     virtual void run() = 0;
-    virtual void stop() = 0;             // any-thread safe; observable at next frame top
+    virtual void stop() = 0;             // any-thread safe; event delivered by next main-thread pump
     virtual void pause() = 0;            // any-thread safe
     virtual void resume() = 0;           // any-thread safe
 

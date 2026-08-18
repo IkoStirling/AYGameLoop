@@ -90,12 +90,18 @@ void GameLoop::shutdown() {
 bool GameLoop::initializeSubSystems() {
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
+    std::vector<ISubSystem*> initialized;
+
     for (ISubSystem* system : systems) {
         ayt::log::info("[GameLoop] Initializing subsystem: %s", system->getName());
         if (!system->initialize()) {
             ayt::log::error("[GameLoop] Failed to initialize subsystem: %s", system->getName());
+            for (auto it = initialized.rbegin(); it != initialized.rend(); ++it) {
+                (*it)->shutdown();
+            }
             return false;
         }
+        initialized.push_back(system);
     }
 
     _subSystemsRunning.store(true);
@@ -143,6 +149,7 @@ void GameLoop::run() {
     _running.store(true);
     _shouldExit.store(false);
     _paused.store(false);
+    _renderFrameInFlight = false;
 
     if (_sync.isRenderThreadEnabled()) {
         _sync.startRenderThread();
@@ -159,6 +166,7 @@ void GameLoop::run() {
     mainLoop();
 
     _sync.stopRenderThread();
+    _renderFrameInFlight = false;
 
     _running.store(false);
     ayt::log::info("[GameLoop] Game loop exited");
@@ -170,21 +178,21 @@ void GameLoop::stop() {
     // thread; main thread preferred.
     _shouldExit.store(true);
     GameStoppedEvent event(_frameManager.getFrameCount());
-    ayt::event::EventBus::instance().emit(event);
+    ayt::event::EventBus::instance().post(event);
     ayt::log::info("[GameLoop] Stop requested");
 }
 
 void GameLoop::pause() {
     _paused.store(true);
     GamePausedEvent event(_frameManager.getFrameCount());
-    ayt::event::EventBus::instance().emit(event);
+    ayt::event::EventBus::instance().post(event);
     ayt::log::info("[GameLoop] Paused");
 }
 
 void GameLoop::resume() {
     _paused.store(false);
     GameResumedEvent event(_frameManager.getFrameCount());
-    ayt::event::EventBus::instance().emit(event);
+    ayt::event::EventBus::instance().post(event);
     ayt::log::info("[GameLoop] Resumed");
 }
 
@@ -203,8 +211,9 @@ void GameLoop::mainLoop() {
 }
 
 void GameLoop::tickOnceFrame(bool fixedStepDelta) {
-    if (_sync.isRenderThreadEnabled()) {
+    if (_sync.isRenderThreadEnabled() && _renderFrameInFlight) {
         _sync.waitForRenderComplete();
+        _renderFrameInFlight = false;
     }
 
     // Drain deferred events posted by the render thread (RenderFrameStart/End).
@@ -233,6 +242,7 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     submitRenderCommands();
     if (_sync.isRenderThreadEnabled()) {
         _sync.signalLogicComplete();
+        _renderFrameInFlight = true;
     }
 
     if (!_playSessionActive.load()) {
@@ -265,6 +275,10 @@ bool GameLoop::preparePlaySession() {
     _shouldExit.store(false);
     _paused.store(false);
     _frameManager.setNoLimitFPS(true);
+    _renderFrameInFlight = false;
+    if (_sync.isRenderThreadEnabled()) {
+        _sync.startRenderThread();
+    }
     ayt::log::info("[GameLoop] Editor play session started");
     return true;
 }
@@ -274,6 +288,8 @@ void GameLoop::endPlaySession() {
         return;
     }
 
+    _sync.stopRenderThread();
+    _renderFrameInFlight = false;
     shutdownSubSystems();
     _playSessionActive.store(false);
     _running.store(false);
@@ -316,6 +332,7 @@ void GameLoop::processFixedUpdates() {
             system->fixedUpdate(fixedDt);
         }
     }
+    _frameManager.consumeFixedUpdates(fixedUpdateCount);
 }
 
 void GameLoop::processVariableUpdates() {
@@ -324,10 +341,10 @@ void GameLoop::processVariableUpdates() {
 
     if (_parallelEnabled.load() && _jobScheduler.isInitialized()) {
         auto layers = buildExecutionLayers();
-        runVariableUpdatesParallel(layers, deltaTime);
+        runVariableUpdatesParallel(layers);
     } else {
         for (ISubSystem* system : systems) {
-            system->update(deltaTime);
+            system->update(deltaTimeFor(*system));
         }
     }
 
@@ -335,6 +352,18 @@ void GameLoop::processVariableUpdates() {
     for (const auto& listener : _updateListeners) {
         listener.callback(deltaTime);
     }
+}
+
+float GameLoop::deltaTimeFor(const ISubSystem& system) const {
+    switch (system.getDescriptor().timeType) {
+    case SubSystemDescriptor::TimeType::Scaled:
+        return _frameManager.getScaledDeltaTime();
+    case SubSystemDescriptor::TimeType::Unscaled:
+        return _frameManager.getUnscaledDeltaTime();
+    case SubSystemDescriptor::TimeType::Real:
+        return _frameManager.getRealDeltaTime();
+    }
+    return _frameManager.getScaledDeltaTime();
 }
 
 // Build layer-by-layer DAG for parallel update.
@@ -424,14 +453,14 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
 // Run layers in series; within each layer, fan out subsystems to a TaskGraph
 // that runs them in parallel (no intra-layer dependencies).
 void GameLoop::runVariableUpdatesParallel(
-    const std::vector<std::vector<ISubSystem*>>& layers, float dt) {
+    const std::vector<std::vector<ISubSystem*>>& layers) {
     for (const auto& layer : layers) {
         if (layer.empty()) continue;
 
         auto* graph = _jobScheduler.createGraph();
         if (!graph) {
             // Fallback: serial for this layer.
-            for (ISubSystem* s : layer) s->update(dt);
+            for (ISubSystem* s : layer) s->update(deltaTimeFor(*s));
             continue;
         }
 
@@ -439,7 +468,7 @@ void GameLoop::runVariableUpdatesParallel(
         std::vector<ayt::task::ITaskGraph::INode*> prevLayerNodes;
         for (ISubSystem* s : layer) {
             auto& node = graph->emplace(
-                ayt::task::makeTask([s, dt]() { s->update(dt); }),
+                ayt::task::makeTask([this, s]() { s->update(deltaTimeFor(*s)); }),
                 s->getName()
             );
             (void)node;

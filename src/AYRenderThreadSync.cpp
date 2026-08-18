@@ -20,10 +20,10 @@ void RenderThreadSync::waitForRenderComplete() {
     if (!_renderThreadEnabled) return;
 
     std::unique_lock<ayt::Mutex> lock(_renderMutex);
-    int currentSignal = _renderSignal.load();
-    _renderCond.wait(lock, [this, currentSignal]() {
-        return _renderSignal.load() != currentSignal;
+    _renderCond.wait(lock, [this]() {
+        return _renderCompleted > _renderConsumed || !_renderThreadRunning.load();
     });
+    if (_renderCompleted > _renderConsumed) ++_renderConsumed;
 }
 
 void RenderThreadSync::signalRenderComplete() {
@@ -34,7 +34,7 @@ void RenderThreadSync::signalRenderComplete() {
     // and entering the wait queue.
     {
         std::lock_guard<ayt::Mutex> lock(_renderMutex);
-        _renderSignal.fetchAdd(1);
+        ++_renderCompleted;
     }
     _renderCond.notifyAll();
 }
@@ -44,7 +44,7 @@ void RenderThreadSync::signalLogicComplete() {
 
     {
         std::lock_guard<ayt::Mutex> lock(_logicMutex);
-        _logicSignal.fetchAdd(1);
+        ++_logicRequested;
     }
     _logicCond.notifyAll();
 }
@@ -53,10 +53,10 @@ void RenderThreadSync::waitForLogicComplete() {
     if (!_renderThreadEnabled) return;
 
     std::unique_lock<ayt::Mutex> lock(_logicMutex);
-    int currentSignal = _logicSignal.load();
-    _logicCond.wait(lock, [this, currentSignal]() {
-        return _logicSignal.load() != currentSignal;
+    _logicCond.wait(lock, [this]() {
+        return _logicRequested > _logicConsumed || !_renderThreadRunning.load();
     });
+    if (_logicRequested > _logicConsumed) ++_logicConsumed;
 }
 
 void RenderThreadSync::setRenderThreadEnabled(bool enabled) {
@@ -69,6 +69,12 @@ void RenderThreadSync::setRenderThreadEnabled(bool enabled) {
 void RenderThreadSync::startRenderThread() {
     if (!_renderThreadEnabled || _renderThreadRunning.load()) return;
 
+    {
+        std::lock_guard<ayt::Mutex> logicLock(_logicMutex);
+        std::lock_guard<ayt::Mutex> renderLock(_renderMutex);
+        _logicRequested = _logicConsumed = 0;
+        _renderCompleted = _renderConsumed = 0;
+    }
     _renderThreadRunning.store(true);
     _renderThread = std::make_unique<ayt::Thread>(
         [this]() { renderThreadMain(); },
@@ -82,8 +88,10 @@ void RenderThreadSync::stopRenderThread() {
 
     _renderThreadRunning.store(false);
 
-    // Wake the render thread if it's parked in waitForLogicComplete.
-    signalLogicComplete();
+    // Wake either side if it is parked. Shutdown is a state transition, not
+    // a synthetic frame request/completion.
+    _logicCond.notifyAll();
+    _renderCond.notifyAll();
 
     if (_renderThread && _renderThread->isJoinable()) {
         _renderThread->join();
