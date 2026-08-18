@@ -57,6 +57,9 @@ public:
     void setMaxFixedUpdatesPerFrame(uint32_t count) override {
         _frameManager.setMaxFixedUpdatesPerFrame(count);
     }
+    void setFixedBacklogPolicy(FixedBacklogPolicy policy) override {
+        _frameManager.setFixedBacklogPolicy(policy);
+    }
 
     [[nodiscard]] float getDeltaTime() const override { return _frameManager.getDeltaTime(); }
     [[nodiscard]] float getUnscaledDeltaTime() const override { return _frameManager.getUnscaledDeltaTime(); }
@@ -66,6 +69,12 @@ public:
     [[nodiscard]] double getGameElapsedTime() const override {
         return _frameManager.getGameElapsedTime();
     }
+    [[nodiscard]] float getEffectiveTimeScale() const override {
+        return _frameManager.getEffectiveTimeScale();
+    }
+    [[nodiscard]] FixedBacklogPolicy getFixedBacklogPolicy() const override {
+        return _frameManager.getFixedBacklogPolicy();
+    }
     [[nodiscard]] uint64_t getFrameCount() const override { return _frameManager.getFrameCount(); }
     [[nodiscard]] uint64_t getSimTick() const override { return _simTick; }
     [[nodiscard]] uint64_t getDroppedSimTickCount() const override {
@@ -73,6 +82,9 @@ public:
     }
     [[nodiscard]] double getDroppedSimulationSeconds() const override {
         return _frameManager.getDroppedSimulationSeconds();
+    }
+    [[nodiscard]] double getClampedSimulationSeconds() const override {
+        return _frameManager.getClampedSimulationSeconds();
     }
     [[nodiscard]] PhaseTimingStats getPhaseTiming(FramePhase phase) const override {
         const size_t index = static_cast<size_t>(phase);
@@ -123,7 +135,7 @@ private:
     void tickOnceFrame(bool fixedStepDelta = false);
     void processFixedUpdates();
     void processVariableUpdates(bool paused);
-    void runPhase(FramePhase phase, bool paused);
+    [[nodiscard]] bool runPhase(FramePhase phase, bool paused);
     [[nodiscard]] bool rebuildPhasePlans();
     void applyPendingSubSystemMutations();
     [[nodiscard]] bool hasStrictDependent(const std::string& name) const;
@@ -133,9 +145,10 @@ private:
     // Each layer's subsystems run concurrently; a subsystem in layer N+1
     // depends on every subsystem in layer N (its declared dependencies).
     std::vector<std::vector<ISubSystem*>> buildExecutionLayers(FramePhase phase) const;
-    void runPhaseLayers(FramePhase phase,
-                        const std::vector<std::vector<ISubSystem*>>& layers,
-                        bool paused);
+    [[nodiscard]] bool runPhaseLayers(
+        FramePhase phase,
+        const std::vector<std::vector<ISubSystem*>>& layers,
+        bool paused);
     [[nodiscard]] FrameContext frameContextFor(FramePhase phase,
                                                const ISubSystem& system,
                                                bool paused) const;
@@ -157,6 +170,7 @@ private:
     RenderThreadSync _sync;
     bool _renderFrameInFlight = false;
     uint64_t _simTick = 0;
+    uint64_t _pendingSimTick = 0;
     uint32_t _fixedTicksLastFrame = 0;
 
     std::atomic<bool> _running{false};

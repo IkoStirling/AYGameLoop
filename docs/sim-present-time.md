@@ -58,9 +58,19 @@ PR / design review 必须能回答：
 | `Unscaled` | 不受 timeScale | UI、Editor、加载提示 |
 | `Real` | 墙钟原始 dt | 少数诊断 / 音视频同步（慎用） |
 
-**约定：** `fixedUpdate(fixedDt)` 始终是固定步长本身；积蓄多少步由 FrameManager 决定（与 timeScale 的精确关系以实现为准，评审时以「玩法是否随暂停停住」为准）。
+**约定：** `fixedUpdate(fixedDt)` 始终是固定步长本身；`timeScale` 改变累积的游戏时间，因此改变本帧需要执行的固定步数量，不改变单步 `fixedDt`。
 
-> **实现缺口（诚实注明）：** 今日 `processVariableUpdates` 可能尚未按 `TimeType` 分流 dt。新代码仍应**正确填写** `timeType`；补接线是 GameLoop 后续小任务，不阻塞本纪律。
+### 3.1 固定步积压策略
+
+`IGameLoop::setFixedBacklogPolicy()` 决定超过 `maxFixedUpdatesPerFrame` 时的行为：
+
+| 策略 | 行为 | 适用场景 |
+|------|------|----------|
+| `Drop`（默认） | 执行上限后丢弃完整积压步，保留插值余数 | 强实时客户端；卡顿后优先恢复实时 |
+| `Preserve` | 不丢时间，债务留到后续帧继续追赶 | 离线计算、录制、必须完整推进的模拟 |
+| `ClampScale` | 限制本帧新接收的游戏时间，使工作量不超过上限 | 有界快进；不允许物理落后于游戏时间 |
+
+`ClampScale` 下 `getEffectiveTimeScale()` 可能小于请求的 `timeScale`，而 `getScaledDeltaTime()` 返回本帧实际接收的游戏时间。被限制的累计时长可由 `getClampedSimulationSeconds()` 诊断。
 
 ---
 

@@ -290,6 +290,47 @@ TEST_CASE(FixedCatchUpCapIsConfigurable) {
     CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
 }
 
+TEST_CASE(FixedBacklogPreserveCarriesDebt) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.setFixedBacklogPolicy(FixedBacklogPolicy::Preserve);
+    manager.beginFrameWithDelta(0.25f);
+
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 8);
+    manager.consumeFixedUpdates(8);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 8);
+    CHECK_INT_EQ(static_cast<int>(manager.getDroppedSimTickCount()), 0);
+}
+
+TEST_CASE(FixedBacklogClampScaleLimitsAcceptedGameTime) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.setFixedBacklogPolicy(FixedBacklogPolicy::ClampScale);
+    manager.beginFrameWithDelta(0.25f);
+
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 8);
+    CHECK_FLOAT_EQ(manager.getScaledDeltaTime(), 0.08f, 0.001f);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getGameElapsedTime()), 0.08f, 0.001f);
+    CHECK_FLOAT_EQ(manager.getEffectiveTimeScale(), 0.32f, 0.001f);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getClampedSimulationSeconds()),
+                   0.17f, 0.001f);
+
+    manager.consumeFixedUpdates(8);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+    CHECK_INT_EQ(static_cast<int>(manager.getDroppedSimTickCount()), 0);
+}
+
+TEST_CASE(FixedBacklogClampScaleCapsFastForward) {
+    FrameManager manager;
+    manager.setFixedTimestep(1.0f / 60.0f);
+    manager.setTimeScale(16.0f);
+    manager.setFixedBacklogPolicy(FixedBacklogPolicy::ClampScale);
+    manager.beginFrameWithDelta(1.0f / 60.0f, true);
+
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 8);
+    CHECK_FLOAT_EQ(manager.getEffectiveTimeScale(), 8.0f, 0.001f);
+}
+
 TEST_CASE(GameTimeScaleControlsFixedStepCount) {
     FrameManager manager;
     manager.setFixedTimestep(0.01f);

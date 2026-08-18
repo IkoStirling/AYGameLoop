@@ -1,6 +1,7 @@
 #pragma once
 
 #include <AYCore.h>
+#include <AYGameLoop/FramePolicy.h>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
@@ -116,6 +117,12 @@ public:
             update(context.deltaTime);
         }
     }
+    // Status-aware phase entry. Existing subsystems inherit the adapter;
+    // barrier-owning systems can fail a phase without committing its sim tick.
+    virtual bool tickChecked(FramePhase phase, const FrameContext& context) {
+        tick(phase, context);
+        return true;
+    }
     virtual void shutdown() = 0;
 };
 
@@ -157,6 +164,7 @@ public:
     virtual void setTimeScale(float scale) = 0;
     virtual void setNoLimitFPS(bool noLimit) = 0;
     virtual void setMaxFixedUpdatesPerFrame(uint32_t count) = 0;
+    virtual void setFixedBacklogPolicy(FixedBacklogPolicy policy) = 0;
 
     [[nodiscard]] virtual float getDeltaTime() const = 0;
     [[nodiscard]] virtual float getUnscaledDeltaTime() const = 0;
@@ -164,6 +172,8 @@ public:
     [[nodiscard]] virtual float getInterpolationFactor() const = 0;
     [[nodiscard]] virtual float getElapsedTime() const = 0;
     [[nodiscard]] virtual double getGameElapsedTime() const = 0;
+    [[nodiscard]] virtual float getEffectiveTimeScale() const = 0;
+    [[nodiscard]] virtual FixedBacklogPolicy getFixedBacklogPolicy() const = 0;
     [[nodiscard]] virtual uint64_t getFrameCount() const = 0;
 
     /// Monotonic Sim tick count (increments once per fixedUpdate step).
@@ -172,6 +182,7 @@ public:
     [[nodiscard]] virtual uint64_t getSimTick() const = 0;
     [[nodiscard]] virtual uint64_t getDroppedSimTickCount() const = 0;
     [[nodiscard]] virtual double getDroppedSimulationSeconds() const = 0;
+    [[nodiscard]] virtual double getClampedSimulationSeconds() const = 0;
     [[nodiscard]] virtual PhaseTimingStats getPhaseTiming(FramePhase phase) const = 0;
     [[nodiscard]] virtual uint32_t getFixedTicksLastFrame() const = 0;
 

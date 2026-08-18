@@ -50,6 +50,32 @@ void FrameManager::setBusyWaitThreshold(float seconds) {
         : 0.0f;
 }
 
+void FrameManager::accumulateGameTime(double elapsedSeconds,
+                                      double requestedGameDelta,
+                                      bool advanceGameClock) {
+    _gameDeltaTime = 0.0f;
+    _effectiveTimeScale = 0.0f;
+    if (!advanceGameClock) return;
+
+    double acceptedGameDelta = std::max(0.0, requestedGameDelta);
+    if (_backlogPolicy == FixedBacklogPolicy::ClampScale) {
+        const double frameCapacity = static_cast<double>(_fixedDt)
+            * static_cast<double>(_maxFixedUpdatesPerFrame);
+        const double available = std::max(0.0, frameCapacity - _accumulator);
+        if (acceptedGameDelta > available) {
+            _clampedSimulationSeconds += acceptedGameDelta - available;
+            acceptedGameDelta = available;
+        }
+    }
+
+    _accumulator += acceptedGameDelta;
+    _gameElapsedTime += acceptedGameDelta;
+    _gameDeltaTime = static_cast<float>(acceptedGameDelta);
+    if (elapsedSeconds > 0.0) {
+        _effectiveTimeScale = static_cast<float>(acceptedGameDelta / elapsedSeconds);
+    }
+}
+
 void FrameManager::beginFrame(bool advanceGameClock) {
     const uint64_t currentTimeUs = _clock->nowUs();
     const uint64_t elapsedUs = currentTimeUs >= _sampleTimeUs
@@ -72,11 +98,9 @@ void FrameManager::beginFrame(bool advanceGameClock) {
     _smoothDeltaTime.add(elapsedSec);
 
     _elapsedTime += elapsedSec;
-    if (advanceGameClock) {
-        const double gameDelta = elapsed * static_cast<double>(_timeScale);
-        _accumulator += gameDelta;
-        _gameElapsedTime += gameDelta;
-    }
+    accumulateGameTime(elapsed,
+                       elapsed * static_cast<double>(_timeScale),
+                       advanceGameClock);
 
     float frameTimeMs = elapsedSec * 1000.0f;
     _frameStats.update(frameTimeMs);
@@ -98,10 +122,9 @@ void FrameManager::beginFrameWithDelta(float deltaSeconds,
     _elapsedTime += elapsedSec;
     const double accumulatorDelta = static_cast<double>(elapsedSec)
         * (applyTimeScale ? static_cast<double>(_timeScale) : 1.0);
-    if (advanceGameClock) {
-        _accumulator += accumulatorDelta;
-        _gameElapsedTime += accumulatorDelta;
-    }
+    accumulateGameTime(static_cast<double>(elapsedSec),
+                       accumulatorDelta,
+                       advanceGameClock);
 
     _frameStats.update(elapsedSec * 1000.0f);
     _frameCount++;
@@ -134,10 +157,11 @@ void FrameManager::consumeFixedUpdates(int count) {
     const double fixedDtSeconds = static_cast<double>(_fixedDt);
     _accumulator = std::max(0.0, _accumulator - fixedDtSeconds * count);
 
-    // Hitting the configured cap means the catch-up guard may have truncated the
-    // requested work. Drop only complete overdue steps and retain the
-    // interpolation remainder.
-    if (count == static_cast<int>(_maxFixedUpdatesPerFrame)
+    // Drop intentionally skips only complete overdue steps and retains the
+    // interpolation remainder. Preserve carries debt; ClampScale prevents new
+    // debt at accumulation time (and drains pre-existing debt after a switch).
+    if (_backlogPolicy == FixedBacklogPolicy::Drop
+        && count == static_cast<int>(_maxFixedUpdatesPerFrame)
         && _accumulator >= fixedDtSeconds) {
         const uint64_t dropped = static_cast<uint64_t>(
             std::floor(_accumulator / fixedDtSeconds));
@@ -210,6 +234,9 @@ void FrameManager::reset() {
     _realWallDeltaTime = 0.0f;
     _droppedSimTicks = 0;
     _droppedSimulationSeconds = 0.0;
+    _clampedSimulationSeconds = 0.0;
+    _gameDeltaTime = 0.0f;
+    _effectiveTimeScale = 1.0f;
     _frameStats.reset();
 }
 

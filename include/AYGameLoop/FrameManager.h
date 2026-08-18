@@ -3,6 +3,7 @@
 
 #include <AYCore.h>
 #include <AYTime/IMonotonicClock.h>
+#include <AYGameLoop/FramePolicy.h>
 #include <AYGameLoop/FrameStats.h>
 #include <AYGameLoop/FrameInterpolator.h>
 #include <cstdint>
@@ -28,12 +29,15 @@ public:
     void setTimeScale(float scale);
     [[nodiscard]] float getTimeScale() const { return _timeScale; }
 
-    [[nodiscard]] float getDeltaTime() const { return _smoothDeltaTime.getSmoothed() * _timeScale; }
+    [[nodiscard]] float getDeltaTime() const {
+        return _smoothDeltaTime.getSmoothed() * _effectiveTimeScale;
+    }
     [[nodiscard]] float getUnscaledDeltaTime() const { return _smoothDeltaTime.getRaw(); }
     [[nodiscard]] float getRealDeltaTime() const { return _realWallDeltaTime; }
     [[nodiscard]] float getInterpolationFactor() const;
     [[nodiscard]] float getElapsedTime() const { return _elapsedTime; }
     [[nodiscard]] double getGameElapsedTime() const { return _gameElapsedTime; }
+    [[nodiscard]] float getEffectiveTimeScale() const { return _effectiveTimeScale; }
     [[nodiscard]] uint64_t getFrameCount() const { return _frameCount; }
 
     // Compute next-frame timing. Caps elapsed at 0.25s to prevent tunnelling
@@ -53,18 +57,21 @@ public:
 
     [[nodiscard]] int getFixedUpdateCount() const;
 
-    // Consume fixed steps after they have been simulated. If the per-frame
-    // safety cap was hit, discard whole-step backlog while preserving the
-    // fractional remainder; otherwise the loop would remain pinned at the
-    // cap forever after one long stall.
+    // Consume only successfully committed fixed steps. Backlog handling then
+    // follows FixedBacklogPolicy.
     void consumeFixedUpdates(int count);
 
     void setMaxFixedUpdatesPerFrame(uint32_t count);
     [[nodiscard]] uint32_t getMaxFixedUpdatesPerFrame() const { return _maxFixedUpdatesPerFrame; }
     [[nodiscard]] uint64_t getDroppedSimTickCount() const { return _droppedSimTicks; }
     [[nodiscard]] double getDroppedSimulationSeconds() const { return _droppedSimulationSeconds; }
+    void setFixedBacklogPolicy(FixedBacklogPolicy policy) { _backlogPolicy = policy; }
+    [[nodiscard]] FixedBacklogPolicy getFixedBacklogPolicy() const { return _backlogPolicy; }
+    [[nodiscard]] double getClampedSimulationSeconds() const { return _clampedSimulationSeconds; }
 
-    [[nodiscard]] float getScaledDeltaTime() const { return getUnscaledDeltaTime() * _timeScale; }
+    // Game time actually accepted this frame. It equals rawDelta*timeScale for
+    // Drop/Preserve and may be smaller for ClampScale.
+    [[nodiscard]] float getScaledDeltaTime() const { return _gameDeltaTime; }
 
     // 精确睡眠 + 忙等待限制帧率
     void limitFrameRate();
@@ -90,6 +97,10 @@ public:
     FrameStatsCollector& getFrameStats() { return _frameStats; }
 
 private:
+    void accumulateGameTime(double elapsedSeconds,
+                            double requestedGameDelta,
+                            bool advanceGameClock);
+
     float _targetFPS = 60.0f;
     float _fixedDt = 1.0f / 60.0f;
     float _timeScale = 1.0f;
@@ -107,10 +118,14 @@ private:
     uint32_t _maxFixedUpdatesPerFrame = 8;
     uint64_t _droppedSimTicks = 0;
     double _droppedSimulationSeconds = 0.0;
+    double _clampedSimulationSeconds = 0.0;
+    FixedBacklogPolicy _backlogPolicy = FixedBacklogPolicy::Drop;
 
     // Clamped unscaled delta plus the uncapped monotonic wall delta.
     float _rawDeltaTime = 0.0f;
     float _realWallDeltaTime = 0.0f;
+    float _gameDeltaTime = 0.0f;
+    float _effectiveTimeScale = 1.0f;
 
     bool _noLimitFPS = false;
 

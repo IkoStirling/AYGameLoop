@@ -256,18 +256,20 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     LogicFrameStartEvent startEvent(frameCount, unscaledDeltaTime);
     ayt::event::EventBus::instance().emit(startEvent);
 
-    runPhase(FramePhase::Platform, paused);
+    if (!runPhase(FramePhase::Platform, paused)) return;
 
     // Platform producers post input/window edges. Deliver them before
     // Ingress so every same-frame consumer sees a stable input snapshot.
     ayt::event::EventBus::instance().pump();
-    runPhase(FramePhase::Ingress, paused);
+    if (!runPhase(FramePhase::Ingress, paused)) return;
 
     _fixedTicksLastFrame = 0;
     if (!paused) {
         processFixedUpdates();
     }
+    if (_shouldExit.load()) return;
     processVariableUpdates(paused);
+    if (_shouldExit.load()) return;
 
     // Presentation and egress notifications are delivered at the final
     // main-thread checkpoint before the immutable render packet is submitted.
@@ -358,26 +360,35 @@ void GameLoop::processFixedUpdates() {
     int fixedUpdateCount = _frameManager.getFixedUpdateCount();
     float fixedDt = _frameManager.getFixedTimestep();
     const uint64_t frameCount = _frameManager.getFrameCount();
-    _fixedTicksLastFrame = static_cast<uint32_t>(fixedUpdateCount);
+    int completedCount = 0;
+    _fixedTicksLastFrame = 0;
 
     for (int i = 0; i < fixedUpdateCount; ++i) {
-        ++_simTick;
-        runPhase(FramePhase::FixedPrePhysics, false);
-        runPhase(FramePhase::FixedPhysics, false);
-        runPhase(FramePhase::FixedPostPhysics, false);
+        _pendingSimTick = _simTick + 1;
+        if (!runPhase(FramePhase::FixedPrePhysics, false)
+            || !runPhase(FramePhase::FixedPhysics, false)
+            || !runPhase(FramePhase::FixedPostPhysics, false)) {
+            _pendingSimTick = 0;
+            break;
+        }
+
+        _simTick = _pendingSimTick;
+        _pendingSimTick = 0;
+        ++completedCount;
 
         SimTickEvent tickEvent(_simTick, fixedDt, frameCount);
         ayt::event::EventBus::instance().emit(tickEvent);
         ayt::event::EventBus::instance().pump();
     }
-    _frameManager.consumeFixedUpdates(fixedUpdateCount);
+    _fixedTicksLastFrame = static_cast<uint32_t>(completedCount);
+    _frameManager.consumeFixedUpdates(completedCount);
 }
 
 void GameLoop::processVariableUpdates(bool paused) {
     float deltaTime = _frameManager.getScaledDeltaTime();
 
     if (!paused) {
-        runPhase(FramePhase::Gameplay, false);
+        if (!runPhase(FramePhase::Gameplay, false)) return;
 
         std::vector<UpdateListener> listeners;
         {
@@ -388,11 +399,11 @@ void GameLoop::processVariableUpdates(bool paused) {
             listener.callback(deltaTime);
         }
 
-        runPhase(FramePhase::World, false);
+        if (!runPhase(FramePhase::World, false)) return;
     }
 
-    runPhase(FramePhase::Presentation, paused);
-    runPhase(FramePhase::Egress, paused);
+    if (!runPhase(FramePhase::Presentation, paused)) return;
+    (void)runPhase(FramePhase::Egress, paused);
 }
 
 PhaseMask GameLoop::effectivePhases(const ISubSystem& system) const {
@@ -407,7 +418,7 @@ FrameContext GameLoop::frameContextFor(FramePhase phase,
     FrameContext context;
     context.phase = phase;
     context.frameCount = _frameManager.getFrameCount();
-    context.simTick = _simTick;
+    context.simTick = _pendingSimTick != 0 ? _pendingSimTick : _simTick;
     context.fixedDeltaTime = _frameManager.getFixedTimestep();
     context.gameDeltaTime = paused ? 0.0f : _frameManager.getScaledDeltaTime();
     context.unscaledDeltaTime = _frameManager.getUnscaledDeltaTime();
@@ -420,16 +431,16 @@ FrameContext GameLoop::frameContextFor(FramePhase phase,
     return context;
 }
 
-void GameLoop::runPhase(FramePhase phase, bool paused) {
+bool GameLoop::runPhase(FramePhase phase, bool paused) {
     if (_phasePlansDirty.load() && !rebuildPhasePlans()) {
         ayt::log::error("[GameLoop] Fatal: frame phase graph became invalid at phase %u",
                         static_cast<unsigned>(phase));
         _shouldExit.store(true);
-        return;
+        return false;
     }
     const auto index = static_cast<size_t>(phase);
     const uint64_t startUs = ayt::time::Clock::performanceNowUs();
-    runPhaseLayers(phase, _phasePlans[index], paused);
+    const bool succeeded = runPhaseLayers(phase, _phasePlans[index], paused);
     const uint64_t endUs = ayt::time::Clock::performanceNowUs();
     const uint64_t elapsedUs = endUs >= startUs ? endUs - startUs : 0;
     PhaseTimingStats& timing = _phaseTiming[index];
@@ -437,6 +448,12 @@ void GameLoop::runPhase(FramePhase phase, bool paused) {
     timing.totalTimeUs += elapsedUs;
     timing.lastTimeUs = elapsedUs;
     timing.maxTimeUs = std::max(timing.maxTimeUs, elapsedUs);
+    if (!succeeded) {
+        ayt::log::error("[GameLoop] Fatal: subsystem failed in phase %u",
+                        static_cast<unsigned>(phase));
+        _shouldExit.store(true);
+    }
+    return succeeded;
 }
 
 bool GameLoop::rebuildPhasePlans() {
@@ -669,7 +686,7 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers(FramePhase 
 
 // Run layers in series; within each layer, fan out subsystems to a TaskGraph
 // that runs them in parallel (no intra-layer dependencies).
-void GameLoop::runPhaseLayers(
+bool GameLoop::runPhaseLayers(
     FramePhase phase,
     const std::vector<std::vector<ISubSystem*>>& layers,
     bool paused) {
@@ -678,7 +695,12 @@ void GameLoop::runPhaseLayers(
 
         if (!_parallelEnabled.load() || !_jobScheduler.isInitialized()) {
             for (ISubSystem* system : layer) {
-                system->tick(phase, frameContextFor(phase, *system, paused));
+                if (!system->tickChecked(
+                        phase, frameContextFor(phase, *system, paused))) {
+                    ayt::log::error("[GameLoop] Subsystem '%s' failed",
+                                    system->getName());
+                    return false;
+                }
             }
             continue;
         }
@@ -686,16 +708,26 @@ void GameLoop::runPhaseLayers(
         auto* graph = _jobScheduler.createGraph();
         if (!graph) {
             for (ISubSystem* system : layer) {
-                system->tick(phase, frameContextFor(phase, *system, paused));
+                if (!system->tickChecked(
+                        phase, frameContextFor(phase, *system, paused))) {
+                    ayt::log::error("[GameLoop] Subsystem '%s' failed",
+                                    system->getName());
+                    return false;
+                }
             }
             continue;
         }
 
+        std::atomic<bool> layerSucceeded{true};
         // Emplace one node per subsystem, NO intra-layer dependencies → all parallel.
         for (ISubSystem* s : layer) {
             const FrameContext context = frameContextFor(phase, *s, paused);
             auto& node = graph->emplace(
-                ayt::task::makeTask([s, phase, context]() { s->tick(phase, context); }),
+                ayt::task::makeTask([s, phase, context, &layerSucceeded]() {
+                    if (!s->tickChecked(phase, context)) {
+                        layerSucceeded.store(false, std::memory_order_release);
+                    }
+                }),
                 s->getName()
             );
             (void)node;
@@ -703,7 +735,9 @@ void GameLoop::runPhaseLayers(
 
         _jobScheduler.executeAndWait(graph);
         delete graph;
+        if (!layerSucceeded.load(std::memory_order_acquire)) return false;
     }
+    return true;
 }
 
 void GameLoop::submitRenderCommands() {
