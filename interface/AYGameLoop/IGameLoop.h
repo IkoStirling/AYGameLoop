@@ -10,6 +10,55 @@
 namespace ayt::game
 {
 
+enum class FramePhase : uint8_t {
+    Platform,
+    Ingress,
+    FixedPrePhysics,
+    FixedPhysics,
+    FixedPostPhysics,
+    Gameplay,
+    World,
+    Presentation,
+    Egress,
+    Count
+};
+
+using PhaseMask = uint32_t;
+
+[[nodiscard]] constexpr PhaseMask phaseBit(FramePhase phase) {
+    return PhaseMask{1u} << static_cast<uint8_t>(phase);
+}
+
+[[nodiscard]] constexpr bool hasPhase(PhaseMask mask, FramePhase phase) {
+    return (mask & phaseBit(phase)) != 0;
+}
+
+[[nodiscard]] constexpr bool isFixedPhase(FramePhase phase) {
+    return phase == FramePhase::FixedPrePhysics
+        || phase == FramePhase::FixedPhysics
+        || phase == FramePhase::FixedPostPhysics;
+}
+
+enum class ClockDomain : uint8_t {
+    Legacy,
+    Game,
+    Unscaled,
+    RealWall
+};
+
+struct FrameContext {
+    FramePhase phase = FramePhase::Platform;
+    uint64_t frameCount = 0;
+    uint64_t simTick = 0;
+    float deltaTime = 0.0f;
+    float fixedDeltaTime = 0.0f;
+    float gameDeltaTime = 0.0f;
+    float unscaledDeltaTime = 0.0f;
+    float realWallDeltaTime = 0.0f;
+    float interpolationAlpha = 0.0f;
+    bool paused = false;
+};
+
 // -----------------------------------------------------------------------------
 // Sub-system descriptor (passed at registration time)
 // -----------------------------------------------------------------------------
@@ -22,9 +71,22 @@ struct SubSystemDescriptor {
     enum class TimeType : uint8_t {
         Scaled,     // 受 timeScale 影响（游戏逻辑）
         Unscaled,   // 不受 timeScale 影响（UI、编辑器）
-        Real        // 真实时间，不受任何缩放（物理等）
+        Real        // 真实时间，不受任何缩放（网络超时、诊断等）
     };
     TimeType timeType = TimeType::Scaled;
+
+    // Explicit stage model. phases == 0 activates the legacy adapter
+    // (FixedPrePhysics + Gameplay, using fixedUpdate/update respectively).
+    PhaseMask phases = 0;
+    ClockDomain clock = ClockDomain::Legacy;
+
+    // Strict lifecycle dependencies. Unlike the legacy `dependencies` field,
+    // missing names are initialization errors.
+    std::vector<const char*> initializeAfter;
+
+    // Per-frame ordering edges, applied only among systems in the same phase.
+    std::vector<const char*> runsAfter;
+    int32_t phasePriority = 0;
 };
 
 class ISubSystem {
@@ -35,6 +97,13 @@ public:
     virtual bool initialize() = 0;
     virtual void update(float deltaTime) = 0;
     virtual void fixedUpdate(float fixedDeltaTime) = 0;
+    virtual void tick(FramePhase phase, const FrameContext& context) {
+        if (isFixedPhase(phase)) {
+            fixedUpdate(context.fixedDeltaTime);
+        } else {
+            update(context.deltaTime);
+        }
+    }
     virtual void shutdown() = 0;
 };
 

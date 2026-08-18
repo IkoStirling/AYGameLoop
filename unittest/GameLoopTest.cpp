@@ -105,6 +105,15 @@ TEST_CASE(TimeType) {
                  static_cast<int>(SubSystemDescriptor::TimeType::Real));
 }
 
+TEST_CASE(StageDefaultsUseLegacyAdapter) {
+    SubSystemDescriptor desc;
+    CHECK_INT_EQ(static_cast<int>(desc.phases), 0);
+    CHECK_INT_EQ(static_cast<int>(desc.clock),
+                 static_cast<int>(ClockDomain::Legacy));
+    CHECK_TRUE(desc.initializeAfter.empty());
+    CHECK_TRUE(desc.runsAfter.empty());
+}
+
 TEST_SUITE_END
 
 TEST_SUITE(FrameManager)
@@ -207,6 +216,38 @@ TEST_CASE(FixedCatchUpCapDropsWholeStepBacklog) {
     CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
     CHECK_TRUE(manager.getInterpolationFactor() >= 0.0f);
     CHECK_TRUE(manager.getInterpolationFactor() < 1.0f);
+}
+
+TEST_CASE(GameTimeScaleControlsFixedStepCount) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.setTimeScale(0.5f);
+    manager.beginFrameWithDelta(0.02f, true);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 1);
+    manager.consumeFixedUpdates(1);
+
+    manager.setTimeScale(0.0f);
+    manager.beginFrameWithDelta(0.20f, true);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+}
+
+TEST_CASE(PausedFrameDoesNotAccumulateGameTime) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.beginFrameWithDelta(0.20f, true, false);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+    CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.20f, 0.001f);
+    CHECK_INT_EQ(static_cast<int>(manager.getFrameCount()), 1);
+}
+
+TEST_CASE(FramePhaseMaskHelpers) {
+    const PhaseMask mask = phaseBit(FramePhase::Platform)
+                         | phaseBit(FramePhase::Presentation);
+    CHECK_TRUE(hasPhase(mask, FramePhase::Platform));
+    CHECK_TRUE(hasPhase(mask, FramePhase::Presentation));
+    CHECK_FALSE(hasPhase(mask, FramePhase::Gameplay));
+    CHECK_TRUE(isFixedPhase(FramePhase::FixedPhysics));
+    CHECK_FALSE(isFixedPhase(FramePhase::World));
 }
 
 TEST_CASE(InterpolationFactor_ZeroOnFirstFrame) {
@@ -540,6 +581,22 @@ struct MockSubSystem : public ISubSystem {
 
 } // namespace
 
+TEST_SUITE(FrameStageAdapterTests)
+
+TEST_CASE(DefaultTickRoutesFixedAndVariablePhases) {
+    MockSubSystem mock("StageAdapter");
+    FrameContext context;
+    context.fixedDeltaTime = 0.02f;
+    context.deltaTime = 0.01f;
+
+    mock.tick(FramePhase::FixedPhysics, context);
+    mock.tick(FramePhase::World, context);
+    CHECK_INT_EQ(mock.fixedUpdateCount, 1);
+    CHECK_INT_EQ(mock.updateCount, 1);
+}
+
+TEST_SUITE_END
+
 TEST_SUITE(SubSystemRegistryTests)
 
 TEST_CASE(RegisterAndFind) {
@@ -607,6 +664,19 @@ TEST_CASE(CircularDependencyRefused) {
     // Circular dep → empty order (refuse to execute).
     CHECK_INT_EQ(static_cast<int>(order.size()), 0);
 
+    reg.clearAll();
+}
+
+TEST_CASE(StrictLifecycleDependencyMustExist) {
+    auto& reg = SubSystemRegistry::instance();
+    reg.clearAll();
+
+    auto* dependent = new MockSubSystem("StrictDependent");
+    dependent->desc.initializeAfter = {"MissingRequiredSystem"};
+    reg.registerSubSystem(dependent);
+
+    auto order = reg.getExecutionOrder();
+    CHECK_TRUE(order.empty());
     reg.clearAll();
 }
 

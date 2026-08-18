@@ -19,6 +19,7 @@
 #include <vector>
 #include <atomic>
 #include <functional>
+#include <array>
 
 namespace ayt::game
 {
@@ -99,15 +100,23 @@ private:
     void mainLoop();
     void tickOnceFrame(bool fixedStepDelta = false);
     void processFixedUpdates();
-    void processVariableUpdates();
+    void processVariableUpdates(bool paused);
+    void runPhase(FramePhase phase, bool paused);
+    [[nodiscard]] bool rebuildPhasePlans();
     void submitRenderCommands();
 
     // Layer-by-layer DAG build for parallel subsystem updates.
     // Each layer's subsystems run concurrently; a subsystem in layer N+1
     // depends on every subsystem in layer N (its declared dependencies).
-    std::vector<std::vector<ISubSystem*>> buildExecutionLayers() const;
-    void runVariableUpdatesParallel(const std::vector<std::vector<ISubSystem*>>& layers);
-    [[nodiscard]] float deltaTimeFor(const ISubSystem& system) const;
+    std::vector<std::vector<ISubSystem*>> buildExecutionLayers(FramePhase phase) const;
+    void runPhaseLayers(FramePhase phase,
+                        const std::vector<std::vector<ISubSystem*>>& layers,
+                        bool paused);
+    [[nodiscard]] FrameContext frameContextFor(FramePhase phase,
+                                               const ISubSystem& system,
+                                               bool paused) const;
+    [[nodiscard]] PhaseMask effectivePhases(const ISubSystem& system) const;
+    [[nodiscard]] float deltaTimeFor(const ISubSystem& system, bool paused) const;
 
     bool initializeSubSystems();
     void shutdownSubSystems();
@@ -137,6 +146,10 @@ private:
 
     std::atomic<bool> _parallelEnabled{false};
     JobScheduler _jobScheduler;
+
+    std::array<std::vector<std::vector<ISubSystem*>>,
+               static_cast<size_t>(FramePhase::Count)> _phasePlans;
+    std::atomic<bool> _phasePlansDirty{true};
 
     std::atomic<bool> _noLimitFPS{false};
 };

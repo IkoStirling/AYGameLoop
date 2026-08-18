@@ -29,7 +29,7 @@ public:
 
     [[nodiscard]] float getDeltaTime() const { return _smoothDeltaTime.getSmoothed(); }
     [[nodiscard]] float getUnscaledDeltaTime() const { return _smoothDeltaTime.getRaw(); }
-    [[nodiscard]] float getRealDeltaTime() const { return _rawDeltaTime; }
+    [[nodiscard]] float getRealDeltaTime() const { return _realWallDeltaTime; }
     [[nodiscard]] float getInterpolationFactor() const;
     [[nodiscard]] float getElapsedTime() const { return _elapsedTime; }
     [[nodiscard]] uint64_t getFrameCount() const { return _frameCount; }
@@ -38,10 +38,16 @@ public:
     // after long stalls (debugger break, OS pause). The cap affects only
     // the *reported* delta / smoothed value; _lastTime is NOT advanced by
     // the cap, so the next frame's elapsed reflects wall-clock recovery.
-    void beginFrame();
+    // Set advanceGameClock=false for paused host frames: wall/unscaled clocks
+    // and frame statistics still advance, but the fixed-step accumulator does not.
+    void beginFrame(bool advanceGameClock = true);
 
-    // Editor step: advance simulation by a fixed delta without wall clock.
-    void beginFrameWithDelta(float deltaSeconds);
+    // Deterministic/editor injection without reading the wall clock. Editor
+    // single-step leaves applyTimeScale=false so one step still advances while
+    // paused; tests/replay may opt into normal game-clock scaling.
+    void beginFrameWithDelta(float deltaSeconds,
+                             bool applyTimeScale = false,
+                             bool advanceGameClock = true);
 
     [[nodiscard]] int getFixedUpdateCount() const;
 
@@ -89,8 +95,9 @@ private:
     double _accumulator = 0.0;
     double _frameInterval = 0.0;
 
-    // Raw deltaTime (pre-smoothing). For TimeType::Real consumers.
+    // Clamped unscaled delta plus the uncapped monotonic wall delta.
     float _rawDeltaTime = 0.0f;
+    float _realWallDeltaTime = 0.0f;
 
     bool _noLimitFPS = false;
 

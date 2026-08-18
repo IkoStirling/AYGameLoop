@@ -1,6 +1,7 @@
 # AYGameLoop Frame Stage Model
 
-Status: accepted design target for the next GameLoop revision.
+Status: implemented. The legacy callback adapter remains for external modules
+that have not declared explicit phases yet.
 
 ## Decision
 
@@ -79,10 +80,11 @@ A subsystem may participate in multiple phases. Its callback receives the
 current phase and a read-only `FrameContext`. Dependencies used for lifecycle
 validation never silently become frame-order dependencies.
 
-Within a phase, explicit `runsAfter` edges are allowed. An edge targeting a
-later phase is redundant; an edge targeting an earlier phase is a startup
-error. Missing dependencies and cycles are startup errors rather than silently
-ignored hints.
+Within a phase, explicit `runsAfter` edges are allowed. A dependency that also
+runs in the current phase creates a DAG edge. A dependency completed in an
+earlier phase is already satisfied by the phase barrier; one that only runs in
+a later phase is a startup error. Missing dependencies and cycles are startup
+errors rather than silently ignored hints.
 
 ## Initial subsystem placement
 
@@ -98,8 +100,8 @@ ignored hints.
   `World` for variable animation/camera/render extraction.
 - Audio: `Presentation`, Unscaled.
 - Video: `Presentation`, Unscaled, after Audio.
-- Renderer subsystem preparation: `Presentation`, after Entity; actual render
-  execution remains outside the logic phase graph.
+- Renderer subsystem preparation: `Presentation`, after the `World` barrier;
+  actual render execution remains outside the logic phase graph.
 
 ## Event checkpoints
 
@@ -122,15 +124,18 @@ Paused frames continue `FrameBoundary`, `Platform`, `Ingress`, `Presentation`,
 skipped. This keeps windows, UI, media, networking and editor controls
 responsive without advancing the game simulation.
 
-## Migration order
+## Migration status
 
-1. Add phase and clock types plus validation while retaining the legacy
-   `update/fixedUpdate` adapter.
-2. Change timing to a scaled game accumulator and expose immutable
-   `FrameContext`.
-3. Split Network ingress/egress and Script deterministic/ambient callbacks.
-4. Split Entity fixed synchronization from variable world presentation.
-5. Move event pumps to the defined checkpoints.
-6. Remove legacy `basePriority`, `TimeType`, `update` and `fixedUpdate` after all
-   runtime modules migrate.
+Completed:
 
+1. Phase and clock types, immutable `FrameContext`, startup DAG validation and
+   cached phase execution plans.
+2. Scaled game accumulator, fixed-step catch-up guard, independent unscaled and
+   real-wall clocks, and pause-safe accumulation.
+3. Network ingress/fixed-apply/egress, Script deterministic/ambient, Entity
+   fixed/world, Physics fixed, and presentation module placement.
+4. Defined event checkpoints and pause behavior.
+
+Remaining compatibility cleanup: remove legacy `basePriority`, `TimeType`,
+`update` and `fixedUpdate` only after external/project subsystems migrate to
+explicit descriptors and `tick`.

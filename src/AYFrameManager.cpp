@@ -63,6 +63,11 @@ FrameManager::FrameManager()
     , _lastTime(0.0)
     , _accumulator(0.0)
     , _frameInterval(1.0 / 60.0)
+    , _rawDeltaTime(0.0f)
+    , _realWallDeltaTime(0.0f)
+    , _noLimitFPS(false)
+    , _preciseSleep(true)
+    , _busyWaitThreshold(0.001f)
 {
     _lastTime = getCurrentTime();
 }
@@ -80,10 +85,12 @@ void FrameManager::setTimeScale(float scale) {
     _timeScale = scale >= 0.0f ? scale : 1.0f;
 }
 
-void FrameManager::beginFrame() {
+void FrameManager::beginFrame(bool advanceGameClock) {
     double currentTime = getCurrentTime();
     double elapsed = currentTime - _lastTime;
     _lastTime = currentTime;
+
+    _realWallDeltaTime = static_cast<float>(elapsed);
 
     // Cap to prevent tunnelling after long stalls. _lastTime was already
     // advanced above, so this only affects the reported value, not the
@@ -97,7 +104,9 @@ void FrameManager::beginFrame() {
     _smoothDeltaTime.add(elapsedSec);
 
     _elapsedTime += elapsedSec;
-    _accumulator += elapsed;
+    if (advanceGameClock) {
+        _accumulator += elapsed * static_cast<double>(_timeScale);
+    }
 
     float frameTimeMs = elapsedSec * 1000.0f;
     _frameStats.update(frameTimeMs);
@@ -105,16 +114,23 @@ void FrameManager::beginFrame() {
     _frameCount++;
 }
 
-void FrameManager::beginFrameWithDelta(float deltaSeconds) {
+void FrameManager::beginFrameWithDelta(float deltaSeconds,
+                                       bool applyTimeScale,
+                                       bool advanceGameClock) {
     float elapsedSec = deltaSeconds > 0.0f ? deltaSeconds : _fixedDt;
     if (elapsedSec > 0.25f) {
         elapsedSec = 0.25f;
     }
 
     _rawDeltaTime = elapsedSec;
+    _realWallDeltaTime = elapsedSec;
     _smoothDeltaTime.add(elapsedSec);
     _elapsedTime += elapsedSec;
-    _accumulator += static_cast<double>(elapsedSec);
+    const double accumulatorDelta = static_cast<double>(elapsedSec)
+        * (applyTimeScale ? static_cast<double>(_timeScale) : 1.0);
+    if (advanceGameClock) {
+        _accumulator += accumulatorDelta;
+    }
 
     _frameStats.update(elapsedSec * 1000.0f);
     _frameCount++;
@@ -196,6 +212,8 @@ void FrameManager::reset() {
     _elapsedTime = 0.0f;
     _accumulator = 0.0;
     _lastTime = getCurrentTime();
+    _rawDeltaTime = 0.0f;
+    _realWallDeltaTime = 0.0f;
     _frameStats.reset();
 }
 

@@ -90,6 +90,20 @@ void GameLoop::shutdown() {
 bool GameLoop::initializeSubSystems() {
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
+    if (systems.empty() && SubSystemRegistry::instance().getCount() != 0) {
+        ayt::log::error("[GameLoop] Refusing to initialize an invalid subsystem graph");
+        return false;
+    }
+
+    // Validate lifecycle and per-phase DAGs before causing subsystem side
+    // effects. A missing strict dependency or phase cycle is an init error,
+    // not an empty phase that can be silently skipped at runtime.
+    _phasePlansDirty.store(true);
+    if (!rebuildPhasePlans()) {
+        ayt::log::error("[GameLoop] Refusing to initialize an invalid frame phase graph");
+        return false;
+    }
+
     std::vector<ISubSystem*> initialized;
 
     for (ISubSystem* system : systems) {
@@ -198,14 +212,6 @@ void GameLoop::resume() {
 
 void GameLoop::mainLoop() {
     while (_running.load() && !_shouldExit.load()) {
-        if (_paused.load()) {
-            // Drain render-thread-posted events while paused so consumers
-            // see RenderFrame{Start,End} even during pause.
-            ayt::event::EventBus::instance().pump();
-            ayt::Thread::sleep(0.01f);
-            continue;
-        }
-
         tickOnceFrame();
     }
 }
@@ -220,21 +226,35 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     // Per AYEventSystem design §2.2, post is any-thread; pump must run on main.
     ayt::event::EventBus::instance().pump();
 
+    const bool paused = _paused.load();
     if (fixedStepDelta) {
-        _frameManager.beginFrameWithDelta(_frameManager.getFixedTimestep());
+        _frameManager.beginFrameWithDelta(_frameManager.getFixedTimestep(), false, !paused);
     } else {
-        _frameManager.beginFrame();
+        _frameManager.beginFrame(!paused);
     }
 
-    float deltaTime = _frameManager.getDeltaTime();
+    float deltaTime = paused ? 0.0f : _frameManager.getScaledDeltaTime();
     float unscaledDeltaTime = _frameManager.getUnscaledDeltaTime();
     uint64_t frameCount = _frameManager.getFrameCount();
 
     LogicFrameStartEvent startEvent(frameCount, unscaledDeltaTime);
     ayt::event::EventBus::instance().emit(startEvent);
 
-    processFixedUpdates();
-    processVariableUpdates();
+    runPhase(FramePhase::Platform, paused);
+
+    // Platform producers post input/window edges. Deliver them before
+    // Ingress so every same-frame consumer sees a stable input snapshot.
+    ayt::event::EventBus::instance().pump();
+    runPhase(FramePhase::Ingress, paused);
+
+    if (!paused) {
+        processFixedUpdates();
+    }
+    processVariableUpdates(paused);
+
+    // Presentation and egress notifications are delivered at the final
+    // main-thread checkpoint before the immutable render packet is submitted.
+    ayt::event::EventBus::instance().pump();
 
     LogicFrameEndEvent endEvent(frameCount, deltaTime);
     ayt::event::EventBus::instance().emit(endEvent);
@@ -299,7 +319,7 @@ void GameLoop::endPlaySession() {
 }
 
 void GameLoop::tickOnce() {
-    if (!_playSessionActive.load() || _paused.load()) {
+    if (!_playSessionActive.load()) {
         return;
     }
 
@@ -318,50 +338,120 @@ void GameLoop::stepOnce() {
 }
 
 void GameLoop::processFixedUpdates() {
-    auto systems = SubSystemRegistry::instance().getExecutionOrder();
     int fixedUpdateCount = _frameManager.getFixedUpdateCount();
     float fixedDt = _frameManager.getFixedTimestep();
     const uint64_t frameCount = _frameManager.getFrameCount();
 
     for (int i = 0; i < fixedUpdateCount; ++i) {
         ++_simTick;
+        runPhase(FramePhase::FixedPrePhysics, false);
+        runPhase(FramePhase::FixedPhysics, false);
+        runPhase(FramePhase::FixedPostPhysics, false);
+
         SimTickEvent tickEvent(_simTick, fixedDt, frameCount);
         ayt::event::EventBus::instance().emit(tickEvent);
-
-        for (ISubSystem* system : systems) {
-            system->fixedUpdate(fixedDt);
-        }
+        ayt::event::EventBus::instance().pump();
     }
     _frameManager.consumeFixedUpdates(fixedUpdateCount);
 }
 
-void GameLoop::processVariableUpdates() {
-    float deltaTime = _frameManager.getDeltaTime();
-    auto systems = SubSystemRegistry::instance().getExecutionOrder();
+void GameLoop::processVariableUpdates(bool paused) {
+    float deltaTime = _frameManager.getScaledDeltaTime();
 
-    if (_parallelEnabled.load() && _jobScheduler.isInitialized()) {
-        auto layers = buildExecutionLayers();
-        runVariableUpdatesParallel(layers);
-    } else {
-        for (ISubSystem* system : systems) {
-            system->update(deltaTimeFor(*system));
+    if (!paused) {
+        runPhase(FramePhase::Gameplay, false);
+
+        AY_LOCK_GUARD(_listenerMutex);
+        for (const auto& listener : _updateListeners) {
+            listener.callback(deltaTime);
+        }
+
+        runPhase(FramePhase::World, false);
+    }
+
+    runPhase(FramePhase::Presentation, paused);
+    runPhase(FramePhase::Egress, paused);
+}
+
+PhaseMask GameLoop::effectivePhases(const ISubSystem& system) const {
+    const PhaseMask explicitMask = system.getDescriptor().phases;
+    if (explicitMask != 0) return explicitMask;
+    return phaseBit(FramePhase::FixedPrePhysics) | phaseBit(FramePhase::Gameplay);
+}
+
+FrameContext GameLoop::frameContextFor(FramePhase phase,
+                                       const ISubSystem& system,
+                                       bool paused) const {
+    FrameContext context;
+    context.phase = phase;
+    context.frameCount = _frameManager.getFrameCount();
+    context.simTick = _simTick;
+    context.fixedDeltaTime = _frameManager.getFixedTimestep();
+    context.gameDeltaTime = paused ? 0.0f : _frameManager.getScaledDeltaTime();
+    context.unscaledDeltaTime = _frameManager.getUnscaledDeltaTime();
+    context.realWallDeltaTime = _frameManager.getRealDeltaTime();
+    context.interpolationAlpha = _frameManager.getInterpolationFactor();
+    context.paused = paused;
+    context.deltaTime = isFixedPhase(phase)
+        ? context.fixedDeltaTime
+        : deltaTimeFor(system, paused);
+    return context;
+}
+
+void GameLoop::runPhase(FramePhase phase, bool paused) {
+    if (_phasePlansDirty.load() && !rebuildPhasePlans()) return;
+    const auto index = static_cast<size_t>(phase);
+    runPhaseLayers(phase, _phasePlans[index], paused);
+}
+
+bool GameLoop::rebuildPhasePlans() {
+    // Clear the flag before rebuilding so a concurrent registration that
+    // happens during this pass leaves it set for the next phase boundary.
+    _phasePlansDirty.store(false);
+    std::array<std::vector<std::vector<ISubSystem*>>,
+               static_cast<size_t>(FramePhase::Count)> newPlans;
+    const auto allSystems = SubSystemRegistry::instance().getExecutionOrder();
+
+    for (size_t i = 0; i < static_cast<size_t>(FramePhase::Count); ++i) {
+        const auto phase = static_cast<FramePhase>(i);
+        size_t expected = 0;
+        for (ISubSystem* system : allSystems) {
+            if (hasPhase(effectivePhases(*system), phase)) ++expected;
+        }
+
+        newPlans[i] = buildExecutionLayers(phase);
+        size_t scheduled = 0;
+        for (const auto& layer : newPlans[i]) scheduled += layer.size();
+        if (scheduled != expected) {
+            _phasePlansDirty.store(true);
+            return false;
         }
     }
 
-    AY_LOCK_GUARD(_listenerMutex);
-    for (const auto& listener : _updateListeners) {
-        listener.callback(deltaTime);
-    }
+    _phasePlans = std::move(newPlans);
+    return true;
 }
 
-float GameLoop::deltaTimeFor(const ISubSystem& system) const {
-    switch (system.getDescriptor().timeType) {
-    case SubSystemDescriptor::TimeType::Scaled:
-        return _frameManager.getScaledDeltaTime();
-    case SubSystemDescriptor::TimeType::Unscaled:
+float GameLoop::deltaTimeFor(const ISubSystem& system, bool paused) const {
+    const auto& descriptor = system.getDescriptor();
+    ClockDomain clock = descriptor.clock;
+    if (clock == ClockDomain::Legacy) {
+        switch (descriptor.timeType) {
+        case SubSystemDescriptor::TimeType::Scaled:   clock = ClockDomain::Game; break;
+        case SubSystemDescriptor::TimeType::Unscaled: clock = ClockDomain::Unscaled; break;
+        case SubSystemDescriptor::TimeType::Real:     clock = ClockDomain::RealWall; break;
+        }
+    }
+
+    switch (clock) {
+    case ClockDomain::Game:
+        return paused ? 0.0f : _frameManager.getScaledDeltaTime();
+    case ClockDomain::Unscaled:
         return _frameManager.getUnscaledDeltaTime();
-    case SubSystemDescriptor::TimeType::Real:
+    case ClockDomain::RealWall:
         return _frameManager.getRealDeltaTime();
+    case ClockDomain::Legacy:
+        break;
     }
     return _frameManager.getScaledDeltaTime();
 }
@@ -375,20 +465,27 @@ float GameLoop::deltaTimeFor(const ISubSystem& system) const {
 //
 // Dependencies come from the override map (set via the descriptor overload
 // of registerSubSystem) merged over each subsystem's getDescriptor().
-std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
-    auto systems = SubSystemRegistry::instance().getExecutionOrder();
+std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers(FramePhase phase) const {
+    auto allSystems = SubSystemRegistry::instance().getExecutionOrder();
+    std::vector<ISubSystem*> systems;
+    for (ISubSystem* system : allSystems) {
+        if (hasPhase(effectivePhases(*system), phase)) systems.push_back(system);
+    }
 
     // Effective descriptor for each registered system: override wins over getDescriptor().
     std::unordered_map<std::string, std::vector<std::string>> deps;
     for (ISubSystem* s : systems) {
         std::vector<std::string> merged;
-        // Start with the subsystem's own dependencies.
-        for (const char* d : s->getDescriptor().dependencies) {
+        const auto& descriptor = s->getDescriptor();
+        const auto& phaseDeps = descriptor.phases == 0
+            ? descriptor.dependencies
+            : descriptor.runsAfter;
+        for (const char* d : phaseDeps) {
             if (d) merged.emplace_back(d);
         }
-        // Apply override (if any) — overrides REPLACE the subsystem's own list.
+        // Registration-time overrides apply to legacy systems only.
         auto overrideList = SubSystemRegistry::instance().getDependencyOverride(s->getName());
-        if (overrideList) {
+        if (descriptor.phases == 0 && overrideList) {
             merged.clear();
             for (const char* d : *overrideList) {
                 if (d) merged.emplace_back(d);
@@ -406,15 +503,42 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
         const std::string name = s->getName();
         for (const auto& d : deps[name]) {
             auto it = inDegree.find(d);
-            if (it == inDegree.end()) continue; // dependency not registered; skip
+            if (it == inDegree.end()) {
+                if (s->getDescriptor().phases == 0) continue;
+
+                ISubSystem* dependency = nullptr;
+                for (ISubSystem* candidate : allSystems) {
+                    if (d == candidate->getName()) {
+                        dependency = candidate;
+                        break;
+                    }
+                }
+                if (!dependency) {
+                    ayt::log::error("[GameLoop] phase dependency '%s' for '%s' is not registered",
+                                    d.c_str(), name.c_str());
+                    return {};
+                }
+
+                bool satisfiedByEarlierPhase = false;
+                for (uint8_t p = 0; p < static_cast<uint8_t>(phase); ++p) {
+                    if (hasPhase(effectivePhases(*dependency), static_cast<FramePhase>(p))) {
+                        satisfiedByEarlierPhase = true;
+                        break;
+                    }
+                }
+                if (!satisfiedByEarlierPhase) {
+                    ayt::log::error("[GameLoop] phase dependency '%s' for '%s' points to a later phase",
+                                    d.c_str(), name.c_str());
+                    return {};
+                }
+                continue;
+            }
             adj[d].push_back(name);
             inDegree[name]++;
         }
     }
 
     std::vector<std::vector<ISubSystem*>> layers;
-    std::unordered_map<std::string, ISubSystem*> byName;
-    for (ISubSystem* s : systems) byName[s->getName()] = s;
 
     auto zeroDegree = [&](const std::unordered_map<std::string, int>& deg) {
         std::vector<ISubSystem*> layer;
@@ -426,9 +550,14 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
 
     auto current = zeroDegree(inDegree);
     while (!current.empty()) {
-        // Sort within layer by descending basePriority (higher first).
+        // Priority is only a deterministic tie-breaker inside this phase.
         std::sort(current.begin(), current.end(), [](ISubSystem* a, ISubSystem* b) {
-            return a->getDescriptor().basePriority > b->getDescriptor().basePriority;
+            const auto& ad = a->getDescriptor();
+            const auto& bd = b->getDescriptor();
+            const int32_t ap = ad.phases == 0 ? ad.basePriority : ad.phasePriority;
+            const int32_t bp = bd.phases == 0 ? bd.basePriority : bd.phasePriority;
+            if (ap != bp) return ap > bp;
+            return std::string(a->getName()) < std::string(b->getName());
         });
         layers.push_back(current);
 
@@ -447,28 +576,45 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers() const {
         inDegree = std::move(nextDeg);
     }
 
+    size_t scheduled = 0;
+    for (const auto& layer : layers) scheduled += layer.size();
+    if (scheduled != systems.size()) {
+        ayt::log::error("[GameLoop] cycle detected in frame phase %u",
+                        static_cast<unsigned>(phase));
+        return {};
+    }
     return layers;
 }
 
 // Run layers in series; within each layer, fan out subsystems to a TaskGraph
 // that runs them in parallel (no intra-layer dependencies).
-void GameLoop::runVariableUpdatesParallel(
-    const std::vector<std::vector<ISubSystem*>>& layers) {
+void GameLoop::runPhaseLayers(
+    FramePhase phase,
+    const std::vector<std::vector<ISubSystem*>>& layers,
+    bool paused) {
     for (const auto& layer : layers) {
         if (layer.empty()) continue;
 
+        if (!_parallelEnabled.load() || !_jobScheduler.isInitialized()) {
+            for (ISubSystem* system : layer) {
+                system->tick(phase, frameContextFor(phase, *system, paused));
+            }
+            continue;
+        }
+
         auto* graph = _jobScheduler.createGraph();
         if (!graph) {
-            // Fallback: serial for this layer.
-            for (ISubSystem* s : layer) s->update(deltaTimeFor(*s));
+            for (ISubSystem* system : layer) {
+                system->tick(phase, frameContextFor(phase, *system, paused));
+            }
             continue;
         }
 
         // Emplace one node per subsystem, NO intra-layer dependencies → all parallel.
-        std::vector<ayt::task::ITaskGraph::INode*> prevLayerNodes;
         for (ISubSystem* s : layer) {
+            const FrameContext context = frameContextFor(phase, *s, paused);
             auto& node = graph->emplace(
-                ayt::task::makeTask([this, s]() { s->update(deltaTimeFor(*s)); }),
+                ayt::task::makeTask([s, phase, context]() { s->tick(phase, context); }),
                 s->getName()
             );
             (void)node;
@@ -504,16 +650,19 @@ void GameLoop::setNoLimitFPS(bool noLimit) {
 
 void GameLoop::registerSubSystem(ISubSystem* system) {
     SubSystemRegistry::instance().registerSubSystem(system);
+    _phasePlansDirty.store(true);
 }
 
 void GameLoop::registerSubSystem(ISubSystem* system,
                                  std::vector<const char*> dependencies,
                                  int32_t priority) {
     SubSystemRegistry::instance().registerSubSystem(system, std::move(dependencies), priority);
+    _phasePlansDirty.store(true);
 }
 
 void GameLoop::unregisterSubSystem(const char* name) {
     SubSystemRegistry::instance().unregisterSubSystem(name);
+    _phasePlansDirty.store(true);
 }
 
 uint64_t GameLoop::onUpdate(UpdateCallback callback) {

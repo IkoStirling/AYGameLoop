@@ -135,8 +135,9 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
     // Effective descriptor merging: override wins over getDescriptor().
     auto effectiveDeps = [&](const Entry& e) -> std::vector<const char*> {
         if (e.depOverride) return *e.depOverride;
-        // Fall back to subsystem's own getDescriptor().
         const auto& desc = e.system->getDescriptor();
+        if (!desc.initializeAfter.empty()) return desc.initializeAfter;
+        // Legacy dependencies remain lenient during migration.
         return desc.dependencies;
     };
     auto effectivePriority = [](const Entry& e) -> int32_t {
@@ -151,6 +152,7 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
         inDegree[pair.first] = 0;
     }
 
+    bool invalidStrictDependency = false;
     for (const auto& pair : _systems) {
         const std::string& name = pair.first;
         for (const char* depName : effectiveDeps(pair.second)) {
@@ -159,9 +161,15 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
             if (_systems.find(dep) != _systems.end()) {
                 adj[dep].push_back(name);
                 inDegree[name]++;
+            } else if (!pair.second.system->getDescriptor().initializeAfter.empty()) {
+                ayt::log::error("[SubSystemRegistry] '%s' requires missing lifecycle dependency '%s'",
+                                name.c_str(), dep.c_str());
+                invalidStrictDependency = true;
             }
         }
     }
+
+    if (invalidStrictDependency) return {};
 
     // Min-heap by priority descending; stable by insertion order on ties.
     struct PrioItem {
