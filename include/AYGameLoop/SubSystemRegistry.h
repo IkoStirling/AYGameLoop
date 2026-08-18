@@ -18,20 +18,25 @@ public:
     static SubSystemRegistry& instance();
 
     // Single-arg registration: descriptor comes from subsystem's getDescriptor().
-    void registerSubSystem(ISubSystem* system);
+    bool registerSubSystem(ISubSystem* system);
 
     // 3-arg registration: dependencies and priority OVERRIDE what
     // getDescriptor() would have returned. Used by REGISTER_SUBSYSTEM macro
     // and any host that wants explicit control.
-    void registerSubSystem(ISubSystem* system,
+    bool registerSubSystem(ISubSystem* system,
                            std::vector<const char*> dependencies,
                            int32_t priority);
 
-    // Removes the system from the registry. Does NOT destroy the system
-    // (subsystem lifetime extends to process exit — see GameLoop::shutdown).
+    // Removes and destroys the system. Runtime code must first call shutdown;
+    // GameLoop does this transactionally at a frame boundary.
     void unregisterSubSystem(const char* name);
 
-    // Forgets every registration (map only). Subsystems are NOT destroyed.
+    // Removes ownership without destroying. Used by GameLoop to unpublish a
+    // system before shutdown while no phase is executing.
+    [[nodiscard]] std::unique_ptr<ISubSystem> takeSubSystem(const char* name);
+
+    // Destroys every registered subsystem. Callers must have shut down any
+    // initialized systems first.
     void clearAll();
 
     // Topologically sorted execution order. Safe from main thread only.
@@ -39,11 +44,11 @@ public:
 
     [[nodiscard]] ISubSystem* findSubSystem(const char* name) const;
 
-    [[nodiscard]] size_t getCount() const { return _systems.size(); }
+    [[nodiscard]] size_t getCount() const;
 
     // Lookup the dependency override (set by 3-arg registerSubSystem).
     // Returns nullopt if no override; merge with subsystem's own descriptor.
-    [[nodiscard]] std::optional<std::vector<const char*>>
+    [[nodiscard]] std::optional<std::vector<std::string>>
     getDependencyOverride(const char* name) const;
 
 private:
@@ -54,7 +59,7 @@ private:
 
     struct Entry {
         std::unique_ptr<ISubSystem> system;
-        std::optional<std::vector<const char*>> depOverride;
+        std::optional<std::vector<std::string>> depOverride;
         int32_t priorityOverride = 0;
         bool hasPriorityOverride = false;
     };

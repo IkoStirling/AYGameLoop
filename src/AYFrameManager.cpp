@@ -1,94 +1,62 @@
 // FrameManager.cpp - 帧率/时间管理实现
 
 #include <AYGameLoop/FrameManager.h>
-#include <AYCore/CoreTime.h>
+#include <algorithm>
 #include <cmath>
-#include <thread>
-#include <cstdio>
-
-#if defined(_WIN32)
-    #include <windows.h>
-#endif
 
 namespace ayt::game
 {
 
-// High-resolution wall clock (microseconds).
-static double getCurrentTimeUs() {
-    return static_cast<double>(ayt::performanceNowUs());
-}
-
-static double getCurrentTime() {
-    return getCurrentTimeUs() * 1e-6;
-}
-
-// High-precision sleep. Uses Win32 waitable timer on Windows, clock_nanosleep
-// on Linux, std::this_thread::sleep_for as fallback.
-#if defined(_WIN32)
-static void sleepHighPrecision(double seconds) {
-    if (seconds <= 0.0) return;
-
-    LARGE_INTEGER dueTime;
-    dueTime.QuadPart = static_cast<LONGLONG>(seconds * 10000000.0);
-
-    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-    if (timer) {
-        SetWaitableTimerEx(timer, &dueTime, 0, nullptr, nullptr, nullptr, 0);
-        WaitForSingleObject(timer, INFINITE);
-        CloseHandle(timer);
-    } else {
-        std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-    }
-}
-#elif defined(__linux__)
-static void sleepHighPrecision(double seconds) {
-    if (seconds <= 0.0) return;
-    struct timespec ts;
-    ts.tv_sec = static_cast<time_t>(seconds);
-    ts.tv_nsec = static_cast<long>((seconds - ts.tv_sec) * 1e9);
-    clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, nullptr);
-}
-#else
-static void sleepHighPrecision(double seconds) {
-    std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
-}
-#endif
-
-FrameManager::FrameManager()
+FrameManager::FrameManager(ayt::time::IMonotonicClock* clock)
     : _targetFPS(60.0f)
     , _fixedDt(1.0f / 60.0f)
     , _timeScale(1.0f)
     , _elapsedTime(0.0f)
     , _frameCount(0)
-    , _lastTime(0.0)
+    , _clock(clock != nullptr ? clock : &ayt::time::IMonotonicClock::system())
+    , _sampleTimeUs(0)
+    , _nextFrameDeadlineUs(0.0)
     , _accumulator(0.0)
-    , _frameInterval(1.0 / 60.0)
+    , _frameIntervalUs(1000000.0 / 60.0)
     , _rawDeltaTime(0.0f)
     , _realWallDeltaTime(0.0f)
     , _noLimitFPS(false)
     , _preciseSleep(true)
     , _busyWaitThreshold(0.001f)
 {
-    _lastTime = getCurrentTime();
+    _sampleTimeUs = _clock->nowUs();
+    _nextFrameDeadlineUs = static_cast<double>(_sampleTimeUs) + _frameIntervalUs;
 }
 
 void FrameManager::setTargetFPS(float fps) {
-    _targetFPS = fps > 0.0f ? fps : 60.0f;
-    _frameInterval = 1.0 / static_cast<double>(_targetFPS);
+    _targetFPS = std::isfinite(fps) && fps > 0.0f
+        ? std::clamp(fps, 1.0f, 10000.0f)
+        : 60.0f;
+    _frameIntervalUs = 1000000.0 / static_cast<double>(_targetFPS);
+    _nextFrameDeadlineUs = static_cast<double>(_clock->nowUs()) + _frameIntervalUs;
 }
 
 void FrameManager::setFixedTimestep(float dt) {
-    _fixedDt = dt > 0.0f ? dt : 1.0f / 60.0f;
+    _fixedDt = std::isfinite(dt) && dt > 0.0f ? dt : 1.0f / 60.0f;
 }
 
 void FrameManager::setTimeScale(float scale) {
-    _timeScale = scale >= 0.0f ? scale : 1.0f;
+    _timeScale = std::isfinite(scale) && scale >= 0.0f ? scale : 1.0f;
+}
+
+void FrameManager::setBusyWaitThreshold(float seconds) {
+    _busyWaitThreshold = std::isfinite(seconds) && seconds > 0.0f
+        ? seconds
+        : 0.0f;
 }
 
 void FrameManager::beginFrame(bool advanceGameClock) {
-    double currentTime = getCurrentTime();
-    double elapsed = currentTime - _lastTime;
-    _lastTime = currentTime;
+    const uint64_t currentTimeUs = _clock->nowUs();
+    const uint64_t elapsedUs = currentTimeUs >= _sampleTimeUs
+        ? currentTimeUs - _sampleTimeUs
+        : 0;
+    _sampleTimeUs = currentTimeUs;
+    double elapsed = static_cast<double>(elapsedUs) * 1e-6;
 
     _realWallDeltaTime = static_cast<float>(elapsed);
 
@@ -105,7 +73,9 @@ void FrameManager::beginFrame(bool advanceGameClock) {
 
     _elapsedTime += elapsedSec;
     if (advanceGameClock) {
-        _accumulator += elapsed * static_cast<double>(_timeScale);
+        const double gameDelta = elapsed * static_cast<double>(_timeScale);
+        _accumulator += gameDelta;
+        _gameElapsedTime += gameDelta;
     }
 
     float frameTimeMs = elapsedSec * 1000.0f;
@@ -130,6 +100,7 @@ void FrameManager::beginFrameWithDelta(float deltaSeconds,
         * (applyTimeScale ? static_cast<double>(_timeScale) : 1.0);
     if (advanceGameClock) {
         _accumulator += accumulatorDelta;
+        _gameElapsedTime += accumulatorDelta;
     }
 
     _frameStats.update(elapsedSec * 1000.0f);
@@ -149,7 +120,12 @@ int FrameManager::getFixedUpdateCount() const {
     int count = static_cast<int>(std::floor(_accumulator / fixedDtSeconds));
 
     // Cap per-frame fixed steps to avoid death-spiral after stalls.
-    return count > 8 ? 8 : count;
+    const int maximum = static_cast<int>(_maxFixedUpdatesPerFrame);
+    return count > maximum ? maximum : count;
+}
+
+void FrameManager::setMaxFixedUpdatesPerFrame(uint32_t count) {
+    _maxFixedUpdatesPerFrame = std::clamp(count, 1u, 64u);
 }
 
 void FrameManager::consumeFixedUpdates(int count) {
@@ -158,10 +134,15 @@ void FrameManager::consumeFixedUpdates(int count) {
     const double fixedDtSeconds = static_cast<double>(_fixedDt);
     _accumulator = std::max(0.0, _accumulator - fixedDtSeconds * count);
 
-    // A count of eight means the catch-up guard may have truncated the
+    // Hitting the configured cap means the catch-up guard may have truncated the
     // requested work. Drop only complete overdue steps and retain the
     // interpolation remainder.
-    if (count == 8 && _accumulator >= fixedDtSeconds) {
+    if (count == static_cast<int>(_maxFixedUpdatesPerFrame)
+        && _accumulator >= fixedDtSeconds) {
+        const uint64_t dropped = static_cast<uint64_t>(
+            std::floor(_accumulator / fixedDtSeconds));
+        _droppedSimTicks += dropped;
+        _droppedSimulationSeconds += static_cast<double>(dropped) * fixedDtSeconds;
         _accumulator = std::fmod(_accumulator, fixedDtSeconds);
     }
 }
@@ -169,51 +150,66 @@ void FrameManager::consumeFixedUpdates(int count) {
 void FrameManager::limitFrameRate() {
     if (_noLimitFPS) return;
 
-    double targetTime = _lastTime + _frameInterval;
-    double currentTime = getCurrentTime();
+    double currentTimeUs = static_cast<double>(_clock->nowUs());
+    double sleepTimeUs = _nextFrameDeadlineUs - currentTimeUs;
 
-    double sleepTime = targetTime - currentTime;
-
-    if (sleepTime <= 0.0) {
-        // Already behind; resync to wall clock to avoid run-away accumulation.
-        _lastTime = currentTime;
+    if (sleepTimeUs <= 0.0) {
+        // Already behind. Preserve a stable cadence for small overruns, but
+        // resync after a full missed interval to avoid runaway catch-up.
+        if (currentTimeUs > _nextFrameDeadlineUs + _frameIntervalUs) {
+            _nextFrameDeadlineUs = currentTimeUs + _frameIntervalUs;
+        } else {
+            _nextFrameDeadlineUs += _frameIntervalUs;
+        }
         return;
     }
 
     if (_preciseSleep) {
-        if (sleepTime > _busyWaitThreshold) {
-            double sleepSeconds = sleepTime - _busyWaitThreshold;
-            sleepHighPrecision(sleepSeconds);
-            currentTime = getCurrentTime();
-            sleepTime = targetTime - currentTime;
+        const double busyWaitThresholdUs =
+            static_cast<double>(_busyWaitThreshold) * 1000000.0;
+        if (sleepTimeUs > busyWaitThresholdUs) {
+            const int64_t coarseSleepUs = static_cast<int64_t>(
+                sleepTimeUs - busyWaitThresholdUs);
+            _clock->sleepFor(ayt::time::Duration::fromUs(coarseSleepUs));
+            currentTimeUs = static_cast<double>(_clock->nowUs());
+            sleepTimeUs = _nextFrameDeadlineUs - currentTimeUs;
         }
 
         // Busy-wait remainder.
-        while (sleepTime > 0.0) {
-            currentTime = getCurrentTime();
-            sleepTime = targetTime - currentTime;
+        while (sleepTimeUs > 0.0) {
+            currentTimeUs = static_cast<double>(_clock->nowUs());
+            sleepTimeUs = _nextFrameDeadlineUs - currentTimeUs;
         }
     } else {
-        if (sleepTime > 0.0) {
-            std::this_thread::sleep_for(std::chrono::duration<double>(sleepTime));
-        }
+        _clock->sleepFor(ayt::time::Duration::fromUs(
+            static_cast<int64_t>(sleepTimeUs)));
     }
 
-    currentTime = getCurrentTime();
-    if (currentTime > targetTime + _frameInterval) {
-        _lastTime = currentTime;
+    currentTimeUs = static_cast<double>(_clock->nowUs());
+    if (currentTimeUs > _nextFrameDeadlineUs + _frameIntervalUs) {
+        _nextFrameDeadlineUs = currentTimeUs + _frameIntervalUs;
     } else {
-        _lastTime = targetTime;
+        _nextFrameDeadlineUs += _frameIntervalUs;
     }
+}
+
+void FrameManager::setNoLimitFPS(bool noLimit) {
+    if (_noLimitFPS == noLimit) return;
+    _noLimitFPS = noLimit;
+    _nextFrameDeadlineUs = static_cast<double>(_clock->nowUs()) + _frameIntervalUs;
 }
 
 void FrameManager::reset() {
     _frameCount = 0;
     _elapsedTime = 0.0f;
+    _gameElapsedTime = 0.0;
     _accumulator = 0.0;
-    _lastTime = getCurrentTime();
+    _sampleTimeUs = _clock->nowUs();
+    _nextFrameDeadlineUs = static_cast<double>(_sampleTimeUs) + _frameIntervalUs;
     _rawDeltaTime = 0.0f;
     _realWallDeltaTime = 0.0f;
+    _droppedSimTicks = 0;
+    _droppedSimulationSeconds = 0.0;
     _frameStats.reset();
 }
 

@@ -5,7 +5,9 @@
 #include <AYEventSystem/EventBus.h>
 #include <AYTask.h>
 #include <AYLog.h>
+#include <AYTime/Clock.h>
 #include <cstdio>
+#include <unordered_set>
 
 namespace ayt::game
 {
@@ -65,11 +67,11 @@ void GameLoop::shutdown() {
     }
 
     shutdownSubSystems();
-    // NOTE: clearAll() does NOT destroy subsystems — their lifetime extends
-    // to process exit. The registry only forgets the lookup keys. This
-    // prevents use-after-free when static-init registrars (REGISTER_SUBSYSTEM)
-    // tear down before GameLoop's static dtor runs.
     SubSystemRegistry::instance().clearAll();
+    {
+        AY_LOCK_GUARD(_subSystemMutationMutex);
+        _pendingSubSystemMutations.clear();
+    }
 
     if (_parallelEnabled.load()) {
         _jobScheduler.shutdown();
@@ -88,10 +90,15 @@ void GameLoop::shutdown() {
 }
 
 bool GameLoop::initializeSubSystems() {
+    // From this point until shutdown, cross-thread mutations are deferred to
+    // frame boundaries. This closes the initialization window where a direct
+    // registry edit could invalidate the order being traversed below.
+    _deferSubSystemMutations.store(true, std::memory_order_release);
     auto systems = SubSystemRegistry::instance().getExecutionOrder();
 
     if (systems.empty() && SubSystemRegistry::instance().getCount() != 0) {
         ayt::log::error("[GameLoop] Refusing to initialize an invalid subsystem graph");
+        _deferSubSystemMutations.store(false, std::memory_order_release);
         return false;
     }
 
@@ -101,6 +108,7 @@ bool GameLoop::initializeSubSystems() {
     _phasePlansDirty.store(true);
     if (!rebuildPhasePlans()) {
         ayt::log::error("[GameLoop] Refusing to initialize an invalid frame phase graph");
+        _deferSubSystemMutations.store(false, std::memory_order_release);
         return false;
     }
 
@@ -113,6 +121,7 @@ bool GameLoop::initializeSubSystems() {
             for (auto it = initialized.rbegin(); it != initialized.rend(); ++it) {
                 (*it)->shutdown();
             }
+            _deferSubSystemMutations.store(false, std::memory_order_release);
             return false;
         }
         initialized.push_back(system);
@@ -137,6 +146,7 @@ void GameLoop::shutdownSubSystems() {
     }
 
     _subSystemsRunning.store(false);
+    _deferSubSystemMutations.store(false, std::memory_order_release);
 }
 
 void GameLoop::run() {
@@ -222,6 +232,12 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
         _renderFrameInFlight = false;
     }
 
+    // The previous frame (including parallel jobs/render consumption) is now
+    // quiescent. This is the sole mutation point for the active registry and
+    // cached phase plans.
+    applyPendingSubSystemMutations();
+    if (_shouldExit.load()) return;
+
     // Drain deferred events posted by the render thread (RenderFrameStart/End).
     // Per AYEventSystem design §2.2, post is any-thread; pump must run on main.
     ayt::event::EventBus::instance().pump();
@@ -247,6 +263,7 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     ayt::event::EventBus::instance().pump();
     runPhase(FramePhase::Ingress, paused);
 
+    _fixedTicksLastFrame = 0;
     if (!paused) {
         processFixedUpdates();
     }
@@ -341,6 +358,7 @@ void GameLoop::processFixedUpdates() {
     int fixedUpdateCount = _frameManager.getFixedUpdateCount();
     float fixedDt = _frameManager.getFixedTimestep();
     const uint64_t frameCount = _frameManager.getFrameCount();
+    _fixedTicksLastFrame = static_cast<uint32_t>(fixedUpdateCount);
 
     for (int i = 0; i < fixedUpdateCount; ++i) {
         ++_simTick;
@@ -361,8 +379,12 @@ void GameLoop::processVariableUpdates(bool paused) {
     if (!paused) {
         runPhase(FramePhase::Gameplay, false);
 
-        AY_LOCK_GUARD(_listenerMutex);
-        for (const auto& listener : _updateListeners) {
+        std::vector<UpdateListener> listeners;
+        {
+            AY_LOCK_GUARD(_listenerMutex);
+            listeners = _updateListeners;
+        }
+        for (const auto& listener : listeners) {
             listener.callback(deltaTime);
         }
 
@@ -399,9 +421,22 @@ FrameContext GameLoop::frameContextFor(FramePhase phase,
 }
 
 void GameLoop::runPhase(FramePhase phase, bool paused) {
-    if (_phasePlansDirty.load() && !rebuildPhasePlans()) return;
+    if (_phasePlansDirty.load() && !rebuildPhasePlans()) {
+        ayt::log::error("[GameLoop] Fatal: frame phase graph became invalid at phase %u",
+                        static_cast<unsigned>(phase));
+        _shouldExit.store(true);
+        return;
+    }
     const auto index = static_cast<size_t>(phase);
+    const uint64_t startUs = ayt::time::Clock::performanceNowUs();
     runPhaseLayers(phase, _phasePlans[index], paused);
+    const uint64_t endUs = ayt::time::Clock::performanceNowUs();
+    const uint64_t elapsedUs = endUs >= startUs ? endUs - startUs : 0;
+    PhaseTimingStats& timing = _phaseTiming[index];
+    ++timing.invocationCount;
+    timing.totalTimeUs += elapsedUs;
+    timing.lastTimeUs = elapsedUs;
+    timing.maxTimeUs = std::max(timing.maxTimeUs, elapsedUs);
 }
 
 bool GameLoop::rebuildPhasePlans() {
@@ -487,8 +522,8 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers(FramePhase 
         auto overrideList = SubSystemRegistry::instance().getDependencyOverride(s->getName());
         if (descriptor.phases == 0 && overrideList) {
             merged.clear();
-            for (const char* d : *overrideList) {
-                if (d) merged.emplace_back(d);
+            for (const std::string& d : *overrideList) {
+                merged.push_back(d);
             }
         }
         deps[s->getName()] = std::move(merged);
@@ -559,7 +594,53 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers(FramePhase 
             if (ap != bp) return ap > bp;
             return std::string(a->getName()) < std::string(b->getName());
         });
-        layers.push_back(current);
+        // Split this dependency layer into hazard-free batches. This keeps
+        // independent systems parallel while serializing write/write and
+        // read/write access without inventing fragile name dependencies.
+        std::vector<std::vector<ISubSystem*>> hazardBatches;
+        const auto conflicts = [](const ISubSystem& a, const ISubSystem& b) {
+            const auto& ad = a.getDescriptor();
+            const auto& bd = b.getDescriptor();
+            const auto intersects = [](const std::vector<const char*>& lhs,
+                                       const std::vector<const char*>& rhs) {
+                for (const char* l : lhs) {
+                    if (l == nullptr) continue;
+                    for (const char* r : rhs) {
+                        if (r != nullptr && std::string(l) == r) return true;
+                    }
+                }
+                return false;
+            };
+            return intersects(ad.writes, bd.writes)
+                || intersects(ad.writes, bd.reads)
+                || intersects(ad.reads, bd.writes);
+        };
+        for (ISubSystem* system : current) {
+            // A resource conflict is an ordering edge in the already-sorted
+            // priority/name order. Never place a later conflicting system in
+            // an earlier batch merely because that batch has spare capacity.
+            size_t earliestBatch = 0;
+            for (size_t i = 0; i < hazardBatches.size(); ++i) {
+                if (std::any_of(hazardBatches[i].begin(), hazardBatches[i].end(),
+                        [&](ISubSystem* other) { return conflicts(*system, *other); })) {
+                    earliestBatch = i + 1;
+                }
+            }
+
+            bool placed = false;
+            for (size_t i = earliestBatch; i < hazardBatches.size(); ++i) {
+                const bool blocked = std::any_of(
+                    hazardBatches[i].begin(), hazardBatches[i].end(),
+                    [&](ISubSystem* other) { return conflicts(*system, *other); });
+                if (!blocked) {
+                    hazardBatches[i].push_back(system);
+                    placed = true;
+                    break;
+                }
+            }
+            if (!placed) hazardBatches.push_back({system});
+        }
+        for (auto& batch : hazardBatches) layers.push_back(std::move(batch));
 
         std::unordered_map<std::string, int> nextDeg = inDegree;
         for (ISubSystem* s : current) {
@@ -631,6 +712,166 @@ void GameLoop::submitRenderCommands() {
     }
 }
 
+bool GameLoop::hasStrictDependent(const std::string& name) const {
+    auto& registry = SubSystemRegistry::instance();
+    const auto systems = registry.getExecutionOrder();
+    for (const ISubSystem* system : systems) {
+        if (system == nullptr || name == system->getName()) continue;
+        const auto& descriptor = system->getDescriptor();
+        const auto mentions = [&name](const std::vector<const char*>& dependencies) {
+            return std::any_of(dependencies.begin(), dependencies.end(),
+                [&name](const char* dependency) {
+                    return dependency != nullptr && name == dependency;
+                });
+        };
+        const auto overrideDependencies =
+            registry.getDependencyOverride(system->getName());
+        const bool overrideMentions = overrideDependencies
+            && std::find(overrideDependencies->begin(), overrideDependencies->end(), name)
+                != overrideDependencies->end();
+        if (overrideMentions || mentions(descriptor.initializeAfter)
+            || (descriptor.phases != 0 && mentions(descriptor.runsAfter))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void GameLoop::applyPendingSubSystemMutations() {
+    std::vector<PendingSubSystemMutation> mutations;
+    {
+        AY_LOCK_GUARD(_subSystemMutationMutex);
+        if (_pendingSubSystemMutations.empty()) return;
+        mutations.swap(_pendingSubSystemMutations);
+    }
+
+    auto& registry = SubSystemRegistry::instance();
+
+    // Unpublish removals first. No phase/job is running at this boundary, and
+    // the plan is rebuilt before shutdown/destruction.
+    std::unordered_set<std::string> pendingRemovals;
+    for (auto& mutation : mutations) {
+        if (mutation.kind != PendingSubSystemMutation::Kind::Remove) continue;
+        if (!mutation.name.empty()) pendingRemovals.insert(mutation.name);
+    }
+
+    std::vector<std::unique_ptr<ISubSystem>> removed;
+    bool madeProgress = true;
+    while (madeProgress && !pendingRemovals.empty()) {
+        madeProgress = false;
+        const auto executionOrder = registry.getExecutionOrder();
+        for (auto it = executionOrder.rbegin(); it != executionOrder.rend(); ++it) {
+            const std::string name = (*it)->getName();
+            auto pending = pendingRemovals.find(name);
+            if (pending == pendingRemovals.end() || hasStrictDependent(name)) continue;
+            if (auto system = registry.takeSubSystem(name.c_str())) {
+                removed.push_back(std::move(system));
+                pendingRemovals.erase(pending);
+                madeProgress = true;
+            }
+        }
+    }
+    for (const std::string& name : pendingRemovals) {
+        if (registry.findSubSystem(name.c_str()) != nullptr) {
+            ayt::log::error(
+                "[GameLoop] Cannot remove subsystem '%s': strict dependent remains active",
+                name.c_str());
+        }
+    }
+
+    if (!removed.empty()) {
+        _phasePlansDirty.store(true);
+        if (!rebuildPhasePlans()) {
+            // This should be unreachable because strict dependents were
+            // rejected above. Stop instead of executing stale raw pointers.
+            ayt::log::error("[GameLoop] Fatal phase-plan failure after subsystem removal");
+            _shouldExit.store(true);
+            for (auto& system : removed) system->shutdown();
+            return;
+        }
+        // Leaf dependents were removed first, so this is already reverse
+        // dependency order for shutdown.
+        for (auto& system : removed) {
+            ayt::log::info("[GameLoop] Shutting down removed subsystem: %s",
+                           system->getName());
+            system->shutdown();
+        }
+    }
+
+    // Stage every addition as one batch, allowing two systems queued in the
+    // same frame to satisfy each other's declared ordering requirements.
+    std::vector<std::string> addedNames;
+    for (auto& mutation : mutations) {
+        if (mutation.kind != PendingSubSystemMutation::Kind::Add
+            || !mutation.system) {
+            continue;
+        }
+
+        std::vector<const char*> dependencies;
+        if (mutation.dependencyOverride) {
+            dependencies.reserve(mutation.dependencyOverride->size());
+            for (const std::string& dependency : *mutation.dependencyOverride) {
+                dependencies.push_back(dependency.c_str());
+            }
+        }
+
+        ISubSystem* raw = mutation.system.release();
+        const bool registered = mutation.dependencyOverride
+            ? registry.registerSubSystem(raw, std::move(dependencies),
+                                         mutation.priorityOverride)
+            : registry.registerSubSystem(raw);
+        if (registered) addedNames.push_back(mutation.name);
+    }
+
+    if (addedNames.empty()) return;
+
+    const auto executionOrder = registry.getExecutionOrder();
+    const bool lifecycleValid = !executionOrder.empty() || registry.getCount() == 0;
+    _phasePlansDirty.store(true);
+    const bool phasesValid = lifecycleValid && rebuildPhasePlans();
+    if (!phasesValid) {
+        ayt::log::error("[GameLoop] Rejecting subsystem transaction: invalid lifecycle/phase graph");
+        for (const std::string& name : addedNames) {
+            (void)registry.takeSubSystem(name.c_str());
+        }
+        _phasePlansDirty.store(true);
+        if (!rebuildPhasePlans()) {
+            ayt::log::error("[GameLoop] Failed to restore phase plan after rejected transaction");
+            _shouldExit.store(true);
+        }
+        return;
+    }
+
+    std::vector<ISubSystem*> initialized;
+    for (ISubSystem* system : executionOrder) {
+        if (std::find(addedNames.begin(), addedNames.end(), system->getName())
+            == addedNames.end()) {
+            continue;
+        }
+        ayt::log::info("[GameLoop] Initializing added subsystem: %s", system->getName());
+        if (!system->initialize()) {
+            ayt::log::error("[GameLoop] Rejecting subsystem transaction: '%s' failed to initialize",
+                            system->getName());
+            // initialize() may have acquired a subset of its resources before
+            // reporting failure, so include the failing system in rollback.
+            system->shutdown();
+            for (auto it = initialized.rbegin(); it != initialized.rend(); ++it) {
+                (*it)->shutdown();
+            }
+            for (const std::string& name : addedNames) {
+                (void)registry.takeSubSystem(name.c_str());
+            }
+            _phasePlansDirty.store(true);
+            if (!rebuildPhasePlans()) {
+                ayt::log::error("[GameLoop] Failed to restore phase plan after init rollback");
+                _shouldExit.store(true);
+            }
+            return;
+        }
+        initialized.push_back(system);
+    }
+}
+
 void GameLoop::setTargetFPS(float fps) {
     _frameManager.setTargetFPS(fps);
 }
@@ -649,20 +890,67 @@ void GameLoop::setNoLimitFPS(bool noLimit) {
 }
 
 void GameLoop::registerSubSystem(ISubSystem* system) {
-    SubSystemRegistry::instance().registerSubSystem(system);
-    _phasePlansDirty.store(true);
+    std::unique_ptr<ISubSystem> owner(system);
+    if (!owner) return;
+
+    AY_LOCK_GUARD(_subSystemMutationMutex);
+    if (!_deferSubSystemMutations.load(std::memory_order_acquire)) {
+        if (SubSystemRegistry::instance().registerSubSystem(owner.release())) {
+            _phasePlansDirty.store(true);
+        }
+        return;
+    }
+
+    PendingSubSystemMutation mutation;
+    mutation.kind = PendingSubSystemMutation::Kind::Add;
+    mutation.name = owner->getName() != nullptr ? owner->getName() : "";
+    mutation.system = std::move(owner);
+    _pendingSubSystemMutations.push_back(std::move(mutation));
 }
 
 void GameLoop::registerSubSystem(ISubSystem* system,
                                  std::vector<const char*> dependencies,
                                  int32_t priority) {
-    SubSystemRegistry::instance().registerSubSystem(system, std::move(dependencies), priority);
-    _phasePlansDirty.store(true);
+    std::unique_ptr<ISubSystem> owner(system);
+    if (!owner) return;
+
+    AY_LOCK_GUARD(_subSystemMutationMutex);
+    if (!_deferSubSystemMutations.load(std::memory_order_acquire)) {
+        if (SubSystemRegistry::instance().registerSubSystem(
+                owner.release(), std::move(dependencies), priority)) {
+            _phasePlansDirty.store(true);
+        }
+        return;
+    }
+
+    PendingSubSystemMutation mutation;
+    mutation.kind = PendingSubSystemMutation::Kind::Add;
+    mutation.name = owner->getName() != nullptr ? owner->getName() : "";
+    std::vector<std::string> ownedDependencies;
+    ownedDependencies.reserve(dependencies.size());
+    for (const char* dependency : dependencies) {
+        if (dependency != nullptr) ownedDependencies.emplace_back(dependency);
+    }
+    mutation.dependencyOverride = std::move(ownedDependencies);
+    mutation.priorityOverride = priority;
+    mutation.system = std::move(owner);
+    _pendingSubSystemMutations.push_back(std::move(mutation));
 }
 
 void GameLoop::unregisterSubSystem(const char* name) {
-    SubSystemRegistry::instance().unregisterSubSystem(name);
-    _phasePlansDirty.store(true);
+    if (name == nullptr) return;
+
+    AY_LOCK_GUARD(_subSystemMutationMutex);
+    if (!_deferSubSystemMutations.load(std::memory_order_acquire)) {
+        SubSystemRegistry::instance().unregisterSubSystem(name);
+        _phasePlansDirty.store(true);
+        return;
+    }
+
+    PendingSubSystemMutation mutation;
+    mutation.kind = PendingSubSystemMutation::Kind::Remove;
+    mutation.name = name;
+    _pendingSubSystemMutations.push_back(std::move(mutation));
 }
 
 uint64_t GameLoop::onUpdate(UpdateCallback callback) {

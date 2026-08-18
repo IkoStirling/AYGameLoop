@@ -13,54 +13,67 @@ SubSystemRegistry& SubSystemRegistry::instance() {
     return registry;
 }
 
-void SubSystemRegistry::registerSubSystem(ISubSystem* system) {
+bool SubSystemRegistry::registerSubSystem(ISubSystem* system) {
+    std::unique_ptr<ISubSystem> incoming(system);
     AY_LOCK_GUARD(_mutex);
 
-    if (!system) return;
+    if (!system) return false;
 
     const char* name = system->getName();
     if (!name) {
         ayt::log::error("[SubSystemRegistry] registration failed: name is null");
-        return;
+        return false;
     }
 
     std::string key(name);
     if (_systems.find(key) != _systems.end()) {
         ayt::log::warn("[SubSystemRegistry] '%s' already registered, skipping", name);
-        return;
+        // Registering the exact same pointer twice must not destroy the active
+        // object. A distinct duplicate remains owned by `incoming` and is
+        // destroyed here, preventing the old leak.
+        if (_systems[key].system.get() == system) incoming.release();
+        return false;
     }
 
-    _systems[key] = Entry{std::unique_ptr<ISubSystem>(system),
+    _systems[key] = Entry{std::move(incoming),
                           std::nullopt,
                           0,
                           false};
     _dirty = true;
     ayt::log::info("[SubSystemRegistry] Registered: %s", name);
+    return true;
 }
 
-void SubSystemRegistry::registerSubSystem(ISubSystem* system,
+bool SubSystemRegistry::registerSubSystem(ISubSystem* system,
                                           std::vector<const char*> dependencies,
                                           int32_t priority) {
+    std::unique_ptr<ISubSystem> incoming(system);
     AY_LOCK_GUARD(_mutex);
 
-    if (!system) return;
+    if (!system) return false;
 
     const char* name = system->getName();
     if (!name) {
         ayt::log::error("[SubSystemRegistry] registration failed: name is null");
-        return;
+        return false;
     }
 
     std::string key(name);
     auto it = _systems.find(key);
     if (it != _systems.end()) {
         ayt::log::warn("[SubSystemRegistry] '%s' already registered, skipping", name);
-        return;
+        if (it->second.system.get() == system) incoming.release();
+        return false;
     }
 
     Entry e;
-    e.system = std::unique_ptr<ISubSystem>(system);
-    e.depOverride = std::move(dependencies);
+    e.system = std::move(incoming);
+    std::vector<std::string> ownedDependencies;
+    ownedDependencies.reserve(dependencies.size());
+    for (const char* dependency : dependencies) {
+        if (dependency != nullptr) ownedDependencies.emplace_back(dependency);
+    }
+    e.depOverride = std::move(ownedDependencies);
     e.priorityOverride = priority;
     e.hasPriorityOverride = true;
 
@@ -70,27 +83,30 @@ void SubSystemRegistry::registerSubSystem(ISubSystem* system,
                  name,
                  _systems[key].depOverride ? _systems[key].depOverride->size() : 0,
                  priority);
+    return true;
 }
 
 void SubSystemRegistry::unregisterSubSystem(const char* name) {
+    (void)takeSubSystem(name);
+}
+
+std::unique_ptr<ISubSystem> SubSystemRegistry::takeSubSystem(const char* name) {
     AY_LOCK_GUARD(_mutex);
+    if (!name) return {};
 
-    if (!name) return;
+    auto it = _systems.find(name);
+    if (it == _systems.end()) return {};
 
-    std::string key(name);
-    auto it = _systems.find(key);
-    if (it != _systems.end()) {
-        ayt::log::info("[SubSystemRegistry] Unregistered: %s", name);
-        _systems.erase(it);
-        _dirty = true;
-    }
+    std::unique_ptr<ISubSystem> result = std::move(it->second.system);
+    _systems.erase(it);
+    _executionOrder.clear();
+    _dirty = true;
+    ayt::log::info("[SubSystemRegistry] Unregistered: %s", name);
+    return result;
 }
 
 void SubSystemRegistry::clearAll() {
     AY_LOCK_GUARD(_mutex);
-    // NOTE: subsystems are NOT destroyed. Their lifetime extends to process
-    // exit. This avoids use-after-free when static-init registrars
-    // (REGISTER_SUBSYSTEM) tear down before GameLoop's static dtor runs.
     _systems.clear();
     _executionOrder.clear();
     _dirty = true;
@@ -108,7 +124,7 @@ ISubSystem* SubSystemRegistry::findSubSystem(const char* name) const {
     return nullptr;
 }
 
-std::optional<std::vector<const char*>>
+std::optional<std::vector<std::string>>
 SubSystemRegistry::getDependencyOverride(const char* name) const {
     AY_LOCK_GUARD(_mutex);
 
@@ -116,6 +132,11 @@ SubSystemRegistry::getDependencyOverride(const char* name) const {
     auto it = _systems.find(name);
     if (it == _systems.end()) return std::nullopt;
     return it->second.depOverride;
+}
+
+size_t SubSystemRegistry::getCount() const {
+    AY_LOCK_GUARD(_mutex);
+    return _systems.size();
 }
 
 std::vector<ISubSystem*> SubSystemRegistry::getExecutionOrder() const {
@@ -133,12 +154,19 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
     if (_systems.empty()) return result;
 
     // Effective descriptor merging: override wins over getDescriptor().
-    auto effectiveDeps = [&](const Entry& e) -> std::vector<const char*> {
+    auto effectiveDeps = [&](const Entry& e) -> std::vector<std::string> {
         if (e.depOverride) return *e.depOverride;
         const auto& desc = e.system->getDescriptor();
-        if (!desc.initializeAfter.empty()) return desc.initializeAfter;
+        const auto& source = !desc.initializeAfter.empty()
+            ? desc.initializeAfter
+            : desc.dependencies;
+        std::vector<std::string> result;
+        result.reserve(source.size());
+        for (const char* dependency : source) {
+            if (dependency != nullptr) result.emplace_back(dependency);
+        }
         // Legacy dependencies remain lenient during migration.
-        return desc.dependencies;
+        return result;
     };
     auto effectivePriority = [](const Entry& e) -> int32_t {
         if (e.hasPriorityOverride) return e.priorityOverride;
@@ -155,9 +183,7 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
     bool invalidStrictDependency = false;
     for (const auto& pair : _systems) {
         const std::string& name = pair.first;
-        for (const char* depName : effectiveDeps(pair.second)) {
-            if (!depName) continue;
-            std::string dep(depName);
+        for (const std::string& dep : effectiveDeps(pair.second)) {
             if (_systems.find(dep) != _systems.end()) {
                 adj[dep].push_back(name);
                 inDegree[name]++;

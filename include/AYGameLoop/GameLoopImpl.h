@@ -20,6 +20,9 @@
 #include <atomic>
 #include <functional>
 #include <array>
+#include <memory>
+#include <optional>
+#include <string>
 
 namespace ayt::game
 {
@@ -51,14 +54,33 @@ public:
     void setFixedTimestep(float dt) override;
     void setTimeScale(float scale) override;
     void setNoLimitFPS(bool noLimit) override;
+    void setMaxFixedUpdatesPerFrame(uint32_t count) override {
+        _frameManager.setMaxFixedUpdatesPerFrame(count);
+    }
 
     [[nodiscard]] float getDeltaTime() const override { return _frameManager.getDeltaTime(); }
     [[nodiscard]] float getUnscaledDeltaTime() const override { return _frameManager.getUnscaledDeltaTime(); }
     [[nodiscard]] float getRealDeltaTime() const override { return _frameManager.getRealDeltaTime(); }
     [[nodiscard]] float getInterpolationFactor() const override { return _frameManager.getInterpolationFactor(); }
     [[nodiscard]] float getElapsedTime() const override { return _frameManager.getElapsedTime(); }
+    [[nodiscard]] double getGameElapsedTime() const override {
+        return _frameManager.getGameElapsedTime();
+    }
     [[nodiscard]] uint64_t getFrameCount() const override { return _frameManager.getFrameCount(); }
     [[nodiscard]] uint64_t getSimTick() const override { return _simTick; }
+    [[nodiscard]] uint64_t getDroppedSimTickCount() const override {
+        return _frameManager.getDroppedSimTickCount();
+    }
+    [[nodiscard]] double getDroppedSimulationSeconds() const override {
+        return _frameManager.getDroppedSimulationSeconds();
+    }
+    [[nodiscard]] PhaseTimingStats getPhaseTiming(FramePhase phase) const override {
+        const size_t index = static_cast<size_t>(phase);
+        return index < _phaseTiming.size() ? _phaseTiming[index] : PhaseTimingStats{};
+    }
+    [[nodiscard]] uint32_t getFixedTicksLastFrame() const override {
+        return _fixedTicksLastFrame;
+    }
 
     [[nodiscard]] float getCurrentFPS() const override { return _frameManager.getFrameStats().fps; }
     [[nodiscard]] float getFrameTimeMS() const override { return _frameManager.getFrameStats().avgFrameTimeMs; }
@@ -103,6 +125,8 @@ private:
     void processVariableUpdates(bool paused);
     void runPhase(FramePhase phase, bool paused);
     [[nodiscard]] bool rebuildPhasePlans();
+    void applyPendingSubSystemMutations();
+    [[nodiscard]] bool hasStrictDependent(const std::string& name) const;
     void submitRenderCommands();
 
     // Layer-by-layer DAG build for parallel subsystem updates.
@@ -133,6 +157,7 @@ private:
     RenderThreadSync _sync;
     bool _renderFrameInFlight = false;
     uint64_t _simTick = 0;
+    uint32_t _fixedTicksLastFrame = 0;
 
     std::atomic<bool> _running{false};
     std::atomic<bool> _paused{false};
@@ -143,12 +168,26 @@ private:
     std::atomic<bool> _shutdownInProgress{false};
     std::atomic<bool> _shutdownComplete{false};
     std::atomic<bool> _subSystemsRunning{false};
+    std::atomic<bool> _deferSubSystemMutations{false};
+
+    struct PendingSubSystemMutation {
+        enum class Kind : uint8_t { Add, Remove };
+        Kind kind = Kind::Add;
+        std::unique_ptr<ISubSystem> system;
+        std::string name;
+        std::optional<std::vector<std::string>> dependencyOverride;
+        int32_t priorityOverride = 0;
+    };
+    ayt::Mutex _subSystemMutationMutex;
+    std::vector<PendingSubSystemMutation> _pendingSubSystemMutations;
 
     std::atomic<bool> _parallelEnabled{false};
     JobScheduler _jobScheduler;
 
     std::array<std::vector<std::vector<ISubSystem*>>,
                static_cast<size_t>(FramePhase::Count)> _phasePlans;
+    std::array<PhaseTimingStats,
+               static_cast<size_t>(FramePhase::Count)> _phaseTiming{};
     std::atomic<bool> _phasePlansDirty{true};
 
     std::atomic<bool> _noLimitFPS{false};

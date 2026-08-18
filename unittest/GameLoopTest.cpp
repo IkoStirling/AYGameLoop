@@ -9,6 +9,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <AYTime/IMonotonicClock.h>
 
 using namespace ayt::game;
 // Note: do NOT `using namespace ayt;` — it would clash with ayt::event
@@ -118,6 +119,24 @@ TEST_SUITE_END
 
 TEST_SUITE(FrameManager)
 
+namespace {
+class VirtualMonotonicClock final : public ayt::time::IMonotonicClock {
+public:
+    [[nodiscard]] uint64_t nowUs() const noexcept override { return timeUs; }
+    void sleepFor(ayt::time::Duration duration) noexcept override {
+        if (duration.toUs() > 0) {
+            sleptUs += static_cast<uint64_t>(duration.toUs());
+            timeUs += static_cast<uint64_t>(duration.toUs());
+        }
+    }
+
+    void advance(uint64_t microseconds) noexcept { timeUs += microseconds; }
+
+    uint64_t timeUs = 0;
+    uint64_t sleptUs = 0;
+};
+} // namespace
+
 TEST_CASE(DefaultValues) {
     FrameManager manager;
     CHECK_FLOAT_EQ(manager.getTargetFPS(), 60.0f, 0.001f);
@@ -132,6 +151,8 @@ TEST_CASE(SetFPS) {
     CHECK_FLOAT_EQ(manager.getTargetFPS(), 30.0f, 0.001f);
     manager.setTargetFPS(-1.0f);  // invalid → fallback
     CHECK_FLOAT_EQ(manager.getTargetFPS(), 60.0f, 0.001f);
+    manager.setTargetFPS(20000.0f);
+    CHECK_FLOAT_EQ(manager.getTargetFPS(), 10000.0f, 0.001f);
 }
 
 TEST_CASE(SetTimeScale) {
@@ -163,6 +184,8 @@ TEST_CASE(BusyWaitThreshold) {
     FrameManager manager;
     manager.setBusyWaitThreshold(0.002f);
     CHECK_FLOAT_EQ(manager.getBusyWaitThreshold(), 0.002f, 0.0001f);
+    manager.setBusyWaitThreshold(-1.0f);
+    CHECK_FLOAT_EQ(manager.getBusyWaitThreshold(), 0.0f, 0.0001f);
 }
 
 TEST_CASE(SmoothDeltaTimeFactor) {
@@ -186,6 +209,41 @@ TEST_CASE(BeginFrameAdvances) {
     CHECK_INT_EQ(static_cast<int>(manager.getFrameCount()), 1);
     manager.beginFrame();
     CHECK_INT_EQ(static_cast<int>(manager.getFrameCount()), 2);
+}
+
+TEST_CASE(FramePacingDoesNotOverwriteDeltaSampleTime) {
+    VirtualMonotonicClock clock;
+    FrameManager manager(&clock);
+    manager.setTargetFPS(100.0f); // exact 10 ms interval
+    manager.setBusyWaitThreshold(0.0f);
+
+    clock.advance(1000);
+    manager.beginFrame();
+    CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.001f, 0.00001f);
+
+    // Pacing advances the virtual wall clock to the deadline. The following
+    // beginFrame must observe that elapsed time instead of seeing ~zero.
+    manager.limitFrameRate();
+    CHECK_INT_EQ(static_cast<int>(clock.sleptUs), 9000);
+    manager.beginFrame();
+    CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.009f, 0.00001f);
+}
+
+TEST_CASE(UncappedToCappedTransitionResetsPacingDeadline) {
+    VirtualMonotonicClock clock;
+    FrameManager manager(&clock);
+    manager.setTargetFPS(100.0f);
+    manager.setBusyWaitThreshold(0.0f);
+    manager.setNoLimitFPS(true);
+
+    clock.advance(50000);
+    manager.beginFrame();
+    manager.limitFrameRate();
+    CHECK_INT_EQ(static_cast<int>(clock.sleptUs), 0);
+
+    manager.setNoLimitFPS(false);
+    manager.limitFrameRate();
+    CHECK_INT_EQ(static_cast<int>(clock.sleptUs), 10000);
 }
 
 TEST_CASE(BeginFrameWithDelta) {
@@ -216,6 +274,20 @@ TEST_CASE(FixedCatchUpCapDropsWholeStepBacklog) {
     CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
     CHECK_TRUE(manager.getInterpolationFactor() >= 0.0f);
     CHECK_TRUE(manager.getInterpolationFactor() < 1.0f);
+    CHECK_INT_EQ(static_cast<int>(manager.getDroppedSimTickCount()), 17);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getDroppedSimulationSeconds()),
+                   0.17f, 0.001f);
+}
+
+TEST_CASE(FixedCatchUpCapIsConfigurable) {
+    FrameManager manager;
+    manager.setFixedTimestep(0.01f);
+    manager.setMaxFixedUpdatesPerFrame(3);
+    manager.beginFrameWithDelta(0.10f);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 3);
+    manager.consumeFixedUpdates(3);
+    CHECK_INT_EQ(static_cast<int>(manager.getDroppedSimTickCount()), 7);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
 }
 
 TEST_CASE(GameTimeScaleControlsFixedStepCount) {
@@ -238,6 +310,21 @@ TEST_CASE(PausedFrameDoesNotAccumulateGameTime) {
     CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
     CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.20f, 0.001f);
     CHECK_INT_EQ(static_cast<int>(manager.getFrameCount()), 1);
+}
+
+TEST_CASE(GameElapsedTimeUsesScaleAndStopsWhenPaused) {
+    FrameManager manager;
+    manager.setTimeScale(0.5f);
+
+    manager.beginFrameWithDelta(0.20f, true, true);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getElapsedTime()), 0.20f, 0.001f);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getGameElapsedTime()), 0.10f, 0.001f);
+    CHECK_FLOAT_EQ(manager.getScaledDeltaTime(), 0.10f, 0.001f);
+
+    manager.beginFrameWithDelta(0.30f, true, false);
+    // Host deltas are capped at 250 ms, including deterministic injection.
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getElapsedTime()), 0.45f, 0.001f);
+    CHECK_FLOAT_EQ(static_cast<float>(manager.getGameElapsedTime()), 0.10f, 0.001f);
 }
 
 TEST_CASE(FramePhaseMaskHelpers) {
@@ -553,11 +640,18 @@ struct MockSubSystem : public ISubSystem {
     int fixedUpdateCount = 0;
     std::atomic<bool> inUpdate{false};
     std::atomic<int> overlapCount{0};
+    int* destructionCount = nullptr;
 
-    explicit MockSubSystem(const char* name, int32_t priority = 0) {
+    explicit MockSubSystem(const char* name, int32_t priority = 0,
+                           int* destroyed = nullptr)
+        : destructionCount(destroyed) {
         nameStr = name;
         desc.name = nameStr.c_str();
         desc.basePriority = priority;
+    }
+
+    ~MockSubSystem() override {
+        if (destructionCount != nullptr) ++*destructionCount;
     }
 
     const char* getName() const override { return nameStr.c_str(); }
@@ -616,13 +710,16 @@ TEST_CASE(DuplicateRejected) {
     auto& reg = SubSystemRegistry::instance();
     reg.clearAll();
 
-    auto* a = new MockSubSystem("Dup");
-    auto* b = new MockSubSystem("Dup");
+    int destructionCount = 0;
+    auto* a = new MockSubSystem("Dup", 0, &destructionCount);
+    auto* b = new MockSubSystem("Dup", 0, &destructionCount);
     reg.registerSubSystem(a);
     reg.registerSubSystem(b);
     CHECK_TRUE(reg.findSubSystem("Dup") == a);
+    CHECK_INT_EQ(destructionCount, 1);
 
     reg.clearAll();
+    CHECK_INT_EQ(destructionCount, 2);
 }
 
 TEST_CASE(TopologicalOrderRespectsDependencies) {

@@ -2,6 +2,7 @@
 // AYGameLoop/FrameManager.h - 帧率/时间管理
 
 #include <AYCore.h>
+#include <AYTime/IMonotonicClock.h>
 #include <AYGameLoop/FrameStats.h>
 #include <AYGameLoop/FrameInterpolator.h>
 #include <cstdint>
@@ -13,7 +14,7 @@ namespace ayt::game
 // Threading: main-thread only.
 class FrameManager {
 public:
-    FrameManager();
+    explicit FrameManager(ayt::time::IMonotonicClock* clock = nullptr);
 
     // fps is clamped to [1, 10000]; <=0 falls back to 60.
     void setTargetFPS(float fps);
@@ -27,17 +28,18 @@ public:
     void setTimeScale(float scale);
     [[nodiscard]] float getTimeScale() const { return _timeScale; }
 
-    [[nodiscard]] float getDeltaTime() const { return _smoothDeltaTime.getSmoothed(); }
+    [[nodiscard]] float getDeltaTime() const { return _smoothDeltaTime.getSmoothed() * _timeScale; }
     [[nodiscard]] float getUnscaledDeltaTime() const { return _smoothDeltaTime.getRaw(); }
     [[nodiscard]] float getRealDeltaTime() const { return _realWallDeltaTime; }
     [[nodiscard]] float getInterpolationFactor() const;
     [[nodiscard]] float getElapsedTime() const { return _elapsedTime; }
+    [[nodiscard]] double getGameElapsedTime() const { return _gameElapsedTime; }
     [[nodiscard]] uint64_t getFrameCount() const { return _frameCount; }
 
     // Compute next-frame timing. Caps elapsed at 0.25s to prevent tunnelling
-    // after long stalls (debugger break, OS pause). The cap affects only
-    // the *reported* delta / smoothed value; _lastTime is NOT advanced by
-    // the cap, so the next frame's elapsed reflects wall-clock recovery.
+    // after long stalls (debugger break, OS pause). The sample timestamp is
+    // always advanced to the current AYTime monotonic value, so the cap does
+    // not leak the discarded stall time into the next frame.
     // Set advanceGameClock=false for paused host frames: wall/unscaled clocks
     // and frame statistics still advance, but the fixed-step accumulator does not.
     void beginFrame(bool advanceGameClock = true);
@@ -57,6 +59,11 @@ public:
     // cap forever after one long stall.
     void consumeFixedUpdates(int count);
 
+    void setMaxFixedUpdatesPerFrame(uint32_t count);
+    [[nodiscard]] uint32_t getMaxFixedUpdatesPerFrame() const { return _maxFixedUpdatesPerFrame; }
+    [[nodiscard]] uint64_t getDroppedSimTickCount() const { return _droppedSimTicks; }
+    [[nodiscard]] double getDroppedSimulationSeconds() const { return _droppedSimulationSeconds; }
+
     [[nodiscard]] float getScaledDeltaTime() const { return getUnscaledDeltaTime() * _timeScale; }
 
     // 精确睡眠 + 忙等待限制帧率
@@ -65,7 +72,7 @@ public:
     void setSleepMode(bool precise) { _preciseSleep = precise; }
     [[nodiscard]] bool isPreciseSleep() const { return _preciseSleep; }
 
-    void setBusyWaitThreshold(float seconds) { _busyWaitThreshold = seconds; }
+    void setBusyWaitThreshold(float seconds);
     [[nodiscard]] float getBusyWaitThreshold() const { return _busyWaitThreshold; }
 
     SmoothDeltaTime& getSmoothDeltaTime() { return _smoothDeltaTime; }
@@ -74,7 +81,7 @@ public:
     void setDeltaTimeSmoothing(float factor) { _smoothDeltaTime.setSmoothingFactor(factor); }
     [[nodiscard]] float getDeltaTimeSmoothing() const { return _smoothDeltaTime.getSmoothingFactor(); }
 
-    void setNoLimitFPS(bool noLimit) { _noLimitFPS = noLimit; }
+    void setNoLimitFPS(bool noLimit);
     [[nodiscard]] bool isNoLimitFPS() const { return _noLimitFPS; }
 
     void reset();
@@ -88,12 +95,18 @@ private:
     float _timeScale = 1.0f;
 
     float _elapsedTime = 0.0f;
+    double _gameElapsedTime = 0.0;
 
     uint64_t _frameCount = 0;
 
-    double _lastTime = 0.0;
+    ayt::time::IMonotonicClock* _clock = nullptr;
+    uint64_t _sampleTimeUs = 0;
+    double _nextFrameDeadlineUs = 0.0;
     double _accumulator = 0.0;
-    double _frameInterval = 0.0;
+    double _frameIntervalUs = 0.0;
+    uint32_t _maxFixedUpdatesPerFrame = 8;
+    uint64_t _droppedSimTicks = 0;
+    double _droppedSimulationSeconds = 0.0;
 
     // Clamped unscaled delta plus the uncapped monotonic wall delta.
     float _rawDeltaTime = 0.0f;

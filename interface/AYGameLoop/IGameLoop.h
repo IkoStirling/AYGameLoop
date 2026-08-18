@@ -59,6 +59,13 @@ struct FrameContext {
     bool paused = false;
 };
 
+struct PhaseTimingStats {
+    uint64_t invocationCount = 0;
+    uint64_t totalTimeUs = 0;
+    uint64_t lastTimeUs = 0;
+    uint64_t maxTimeUs = 0;
+};
+
 // -----------------------------------------------------------------------------
 // Sub-system descriptor (passed at registration time)
 // -----------------------------------------------------------------------------
@@ -87,6 +94,11 @@ struct SubSystemDescriptor {
     // Per-frame ordering edges, applied only among systems in the same phase.
     std::vector<const char*> runsAfter;
     int32_t phasePriority = 0;
+
+    // Declarative phase-local hazards. Systems in the same dependency layer
+    // are parallel only when their read/write sets do not conflict.
+    std::vector<const char*> reads;
+    std::vector<const char*> writes;
 };
 
 class ISubSystem {
@@ -144,18 +156,24 @@ public:
     virtual void setFixedTimestep(float dt) = 0;
     virtual void setTimeScale(float scale) = 0;
     virtual void setNoLimitFPS(bool noLimit) = 0;
+    virtual void setMaxFixedUpdatesPerFrame(uint32_t count) = 0;
 
     [[nodiscard]] virtual float getDeltaTime() const = 0;
     [[nodiscard]] virtual float getUnscaledDeltaTime() const = 0;
     [[nodiscard]] virtual float getRealDeltaTime() const = 0;
     [[nodiscard]] virtual float getInterpolationFactor() const = 0;
     [[nodiscard]] virtual float getElapsedTime() const = 0;
+    [[nodiscard]] virtual double getGameElapsedTime() const = 0;
     [[nodiscard]] virtual uint64_t getFrameCount() const = 0;
 
     /// Monotonic Sim tick count (increments once per fixedUpdate step).
     /// Shared time anchor for Scene / Save / Network / Replay subscribers of
     /// `SimTickEvent` (see docs/sim-present-time.md §5).
     [[nodiscard]] virtual uint64_t getSimTick() const = 0;
+    [[nodiscard]] virtual uint64_t getDroppedSimTickCount() const = 0;
+    [[nodiscard]] virtual double getDroppedSimulationSeconds() const = 0;
+    [[nodiscard]] virtual PhaseTimingStats getPhaseTiming(FramePhase phase) const = 0;
+    [[nodiscard]] virtual uint32_t getFixedTicksLastFrame() const = 0;
 
     [[nodiscard]] virtual float getCurrentFPS() const = 0;
     [[nodiscard]] virtual float getFrameTimeMS() const = 0;
@@ -168,8 +186,8 @@ public:
     // and `priority`; those fields override what the subsystem's own
     // getDescriptor() would have returned.
     //
-    // `name` must be stable for the lifetime of the registration; the
-    // registry keys on it.
+    // Runtime mutations are committed transactionally at the next main-frame
+    // boundary. Names and registration-time dependency strings are copied.
     virtual void registerSubSystem(ISubSystem* system) = 0;
 
     // Overload with explicit descriptor override (used by REGISTER_SUBSYSTEM
@@ -181,8 +199,7 @@ public:
     virtual void unregisterSubSystem(const char* name) = 0;
 
     // Per-frame update callback (called once per variable update, on main thread).
-    // Listeners run under an internal mutex; DO NOT unsubscribe yourself
-    // from inside the callback (recursive lock would deadlock).
+    // Listener callbacks run on the main thread.
     using UpdateCallback = std::function<void(float deltaTime)>;
     [[nodiscard]] virtual uint64_t onUpdate(UpdateCallback callback) = 0;
     virtual void offUpdate(uint64_t listenerId) = 0;
