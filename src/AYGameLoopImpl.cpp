@@ -227,7 +227,8 @@ void GameLoop::mainLoop() {
     }
 }
 
-void GameLoop::tickOnceFrame(bool fixedStepDelta) {
+void GameLoop::tickOnceFrame(bool fixedStepDelta,
+                             const HostedFrameContext* hostedFrame) {
     if (_presentationOwnership == PresentationOwnership::GameLoop
         && _sync.isRenderThreadEnabled()
         && _renderFrameInFlight) {
@@ -245,9 +246,18 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     // Per AYEventSystem design §2.2, post is any-thread; pump must run on main.
     ayt::event::EventBus::instance().pump();
 
+    _hostFrameIndex = hostedFrame != nullptr ? hostedFrame->hostFrameIndex : 0;
+    _inputFrameIndex = hostedFrame != nullptr ? hostedFrame->inputFrameIndex : 0;
+
     const bool paused = _paused.load();
     if (fixedStepDelta) {
         _frameManager.beginFrameWithDelta(_frameManager.getFixedTimestep(), false, !paused);
+    } else if (hostedFrame != nullptr) {
+        // The editor sampled this duration for the same OS/input boundary.
+        // Apply normal time scale here; only stepOnce intentionally bypasses it.
+        _frameManager.beginFrameWithDelta(hostedFrame->realWallDeltaTime,
+                                          true,
+                                          !paused);
     } else {
         _frameManager.beginFrame(!paused);
     }
@@ -358,6 +368,14 @@ void GameLoop::tickOnce() {
     tickOnceFrame();
 }
 
+void GameLoop::tickHostedFrame(const HostedFrameContext& context) {
+    if (!_playSessionActive.load()) {
+        return;
+    }
+
+    tickOnceFrame(false, &context);
+}
+
 void GameLoop::stepOnce() {
     if (!_playSessionActive.load()) {
         return;
@@ -432,6 +450,8 @@ FrameContext GameLoop::frameContextFor(FramePhase phase,
     context.phase = phase;
     context.frameCount = _frameManager.getFrameCount();
     context.simTick = _pendingSimTick != 0 ? _pendingSimTick : _simTick;
+    context.hostFrameIndex = _hostFrameIndex;
+    context.inputFrameIndex = _inputFrameIndex;
     context.fixedDeltaTime = _frameManager.getFixedTimestep();
     context.gameDeltaTime = paused ? 0.0f : _frameManager.getScaledDeltaTime();
     context.unscaledDeltaTime = _frameManager.getUnscaledDeltaTime();

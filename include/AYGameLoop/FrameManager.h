@@ -48,9 +48,11 @@ public:
     // and frame statistics still advance, but the fixed-step accumulator does not.
     void beginFrame(bool advanceGameClock = true);
 
-    // Deterministic/editor injection without reading the wall clock. Editor
-    // single-step leaves applyTimeScale=false so one step still advances while
-    // paused; tests/replay may opt into normal game-clock scaling.
+    // Deterministic/editor injection without reading the wall clock. A zero
+    // delta remains zero (important for an external host's first frame).
+    // Editor single-step leaves applyTimeScale=false so one step still
+    // advances while paused; tests/replay may opt into normal game-clock
+    // scaling.
     void beginFrameWithDelta(float deltaSeconds,
                              bool applyTimeScale = false,
                              bool advanceGameClock = true);

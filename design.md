@@ -556,6 +556,15 @@ enum class PresentationOwnership : uint8_t {
     ExternalHost  // host composites and submits the frame
 };
 
+struct HostedFrameContext {
+    float realWallDeltaTime = 0.0f;
+    uint64_t hostFrameIndex = 0;
+    uint64_t inputFrameIndex = 0;
+};
+
+// FrameContext delivered to each subsystem includes the two host indices.
+// In a standalone run they are both zero.
+
 class IGameLoop {
 public:
     virtual ~IGameLoop() = default;
@@ -585,6 +594,7 @@ public:
     virtual bool prepareHostedSession() { return preparePlaySession(); }
     virtual void endHostedSession() { endPlaySession(); }
     virtual void tickOnce() = 0;            // drive from host message loop
+    virtual void tickHostedFrame(const HostedFrameContext& context) = 0;
     virtual void stepOnce() = 0;            // single fixed-step frame
     virtual bool isPlaySessionActive() const = 0;
 

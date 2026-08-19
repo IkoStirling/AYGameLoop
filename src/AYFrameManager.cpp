@@ -111,7 +111,11 @@ void FrameManager::beginFrame(bool advanceGameClock) {
 void FrameManager::beginFrameWithDelta(float deltaSeconds,
                                        bool applyTimeScale,
                                        bool advanceGameClock) {
-    float elapsedSec = deltaSeconds > 0.0f ? deltaSeconds : _fixedDt;
+    // A host's first frame legitimately has zero elapsed time. Preserve that
+    // instead of manufacturing a fixed step; stepOnce passes _fixedDt itself.
+    float elapsedSec = std::isfinite(deltaSeconds) && deltaSeconds > 0.0f
+        ? deltaSeconds
+        : 0.0f;
     if (elapsedSec > 0.25f) {
         elapsedSec = 0.25f;
     }

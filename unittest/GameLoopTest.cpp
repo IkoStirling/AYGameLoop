@@ -264,6 +264,15 @@ TEST_CASE(BeginFrameWithDelta) {
     CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.016f, 0.001f);
 }
 
+TEST_CASE(HostedZeroDeltaDoesNotManufactureFixedStep) {
+    FrameManager manager;
+    manager.beginFrameWithDelta(0.0f, true);
+    CHECK_INT_EQ(static_cast<int>(manager.getFrameCount()), 1);
+    CHECK_FLOAT_EQ(manager.getRealDeltaTime(), 0.0f, 0.0001f);
+    CHECK_FLOAT_EQ(manager.getScaledDeltaTime(), 0.0f, 0.0001f);
+    CHECK_INT_EQ(manager.getFixedUpdateCount(), 0);
+}
+
 TEST_CASE(FixedAccumulatorIsConsumed) {
     FrameManager manager;
     manager.setFixedTimestep(0.01f);
@@ -725,6 +734,32 @@ struct MockSubSystem : public ISubSystem {
     void fixedUpdate(float /*dt*/) override { ++fixedUpdateCount; }
 };
 
+struct HostedFrameCaptureSubSystem final : public ISubSystem {
+    SubSystemDescriptor desc;
+    FrameContext lastContext;
+    uint32_t tickCount = 0;
+
+    HostedFrameCaptureSubSystem() {
+        desc.name = "HostedFrameCapture";
+        desc.phases = phaseBit(FramePhase::Gameplay);
+    }
+
+    const char* getName() const override { return desc.name; }
+    const SubSystemDescriptor& getDescriptor() const override { return desc; }
+    bool initialize() override { return true; }
+    void update(float) override {}
+    void fixedUpdate(float) override {}
+    void shutdown() override {}
+
+    bool tickChecked(FramePhase phase, const FrameContext& context) override {
+        if (phase == FramePhase::Gameplay) {
+            lastContext = context;
+            ++tickCount;
+        }
+        return true;
+    }
+};
+
 } // namespace
 
 TEST_SUITE(FrameStageAdapterTests)
@@ -739,6 +774,40 @@ TEST_CASE(DefaultTickRoutesFixedAndVariablePhases) {
     mock.tick(FramePhase::World, context);
     CHECK_INT_EQ(mock.fixedUpdateCount, 1);
     CHECK_INT_EQ(mock.updateCount, 1);
+}
+
+TEST_SUITE_END
+
+TEST_SUITE(HostedFrameTests)
+
+TEST_CASE(HostFrameTimeAndInputBoundaryReachSubsystems) {
+    auto& loop = GameLoop::instance();
+    auto& registry = SubSystemRegistry::instance();
+
+    loop.endHostedSession();
+    loop.setPresentationOwnership(PresentationOwnership::ExternalHost);
+    registry.clearAll();
+    auto* capture = new HostedFrameCaptureSubSystem();
+    loop.registerSubSystem(capture);
+
+    const bool prepared = loop.prepareHostedSession();
+    CHECK_TRUE(prepared);
+    if (prepared) {
+        HostedFrameContext hostFrame;
+        hostFrame.realWallDeltaTime = 0.025f;
+        hostFrame.hostFrameIndex = 73;
+        hostFrame.inputFrameIndex = 91;
+        loop.tickHostedFrame(hostFrame);
+
+        CHECK_INT_EQ(capture->tickCount, 1);
+        CHECK_INT_EQ(static_cast<int>(capture->lastContext.hostFrameIndex), 73);
+        CHECK_INT_EQ(static_cast<int>(capture->lastContext.inputFrameIndex), 91);
+        CHECK_FLOAT_EQ(capture->lastContext.realWallDeltaTime, 0.025f, 0.0001f);
+        CHECK_FLOAT_EQ(capture->lastContext.unscaledDeltaTime, 0.025f, 0.0001f);
+    }
+
+    loop.endHostedSession();
+    registry.clearAll();
 }
 
 TEST_SUITE_END

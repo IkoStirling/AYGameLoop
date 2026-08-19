@@ -56,10 +56,22 @@ enum class PresentationOwnership : uint8_t {
     ExternalHost
 };
 
+// Immutable host-owned metadata for one externally driven frame.  The loop
+// deliberately remains independent of AYDevice/AYScript: inputFrameIndex
+// names the input snapshot that the host finished polling before this call,
+// while the input payload stays owned by the host's input bridge.
+struct HostedFrameContext {
+    float realWallDeltaTime = 0.0f;
+    uint64_t hostFrameIndex = 0;
+    uint64_t inputFrameIndex = 0;
+};
+
 struct FrameContext {
     FramePhase phase = FramePhase::Platform;
     uint64_t frameCount = 0;
     uint64_t simTick = 0;
+    uint64_t hostFrameIndex = 0;
+    uint64_t inputFrameIndex = 0;
     float deltaTime = 0.0f;
     float fixedDeltaTime = 0.0f;
     float gameDeltaTime = 0.0f;
@@ -139,7 +151,8 @@ public:
 // Game loop interface
 //
 // Threading contract:
-//   - run() / tickOnce() / stepOnce() / preparePlaySession() / endPlaySession()
+//   - run() / tickOnce() / tickHostedFrame() / stepOnce() / preparePlaySession()
+//     / endPlaySession()
 //     and the per-frame accessors (getDeltaTime, getFrameCount, etc.) are
 //     **main-thread only** unless explicitly documented otherwise.
 //   - stop() / pause() / resume() set an atomic flag observable at the next
@@ -166,6 +179,10 @@ public:
     [[nodiscard]] virtual bool preparePlaySession() = 0;
     virtual void endPlaySession() = 0;
     virtual void tickOnce() = 0;
+    // Host-driven frame with an explicit wall-clock sample. The host must poll
+    // input before calling this method; inputFrameIndex is propagated to each
+    // subsystem FrameContext so an input bridge can prove the same boundary.
+    virtual void tickHostedFrame(const HostedFrameContext& context) = 0;
     virtual void stepOnce() = 0;
     [[nodiscard]] virtual bool isPlaySessionActive() const = 0;
 

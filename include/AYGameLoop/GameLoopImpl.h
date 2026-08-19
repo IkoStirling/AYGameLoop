@@ -49,6 +49,7 @@ public:
     [[nodiscard]] bool prepareHostedSession() override;
     void endHostedSession() override;
     void tickOnce() override;
+    void tickHostedFrame(const HostedFrameContext& context) override;
     void stepOnce() override;
     [[nodiscard]] bool isPlaySessionActive() const override { return _playSessionActive.load(); }
 
@@ -138,7 +139,8 @@ private:
     ~GameLoop();
 
     void mainLoop();
-    void tickOnceFrame(bool fixedStepDelta = false);
+    void tickOnceFrame(bool fixedStepDelta = false,
+                       const HostedFrameContext* hostedFrame = nullptr);
     void processFixedUpdates();
     void processVariableUpdates(bool paused);
     [[nodiscard]] bool runPhase(FramePhase phase, bool paused);
@@ -178,6 +180,8 @@ private:
     bool _renderFrameInFlight = false;
     uint64_t _simTick = 0;
     uint64_t _pendingSimTick = 0;
+    uint64_t _hostFrameIndex = 0;
+    uint64_t _inputFrameIndex = 0;
     uint32_t _fixedTicksLastFrame = 0;
 
     std::atomic<bool> _running{false};
