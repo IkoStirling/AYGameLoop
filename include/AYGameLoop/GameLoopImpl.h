@@ -46,6 +46,8 @@ public:
 
     [[nodiscard]] bool preparePlaySession() override;
     void endPlaySession() override;
+    [[nodiscard]] bool prepareHostedSession() override;
+    void endHostedSession() override;
     void tickOnce() override;
     void stepOnce() override;
     [[nodiscard]] bool isPlaySessionActive() const override { return _playSessionActive.load(); }
@@ -121,6 +123,10 @@ public:
 
     // 渲染线程相关
     void setRenderThreadEnabled(bool enabled) override;
+    void setPresentationOwnership(PresentationOwnership ownership) override;
+    [[nodiscard]] PresentationOwnership getPresentationOwnership() const override {
+        return _presentationOwnership;
+    }
     void setRenderCallback(RenderThreadSync::RenderThreadCallback callback) override;
 
     // 并行执行相关
@@ -168,6 +174,7 @@ private:
 
     FrameManager _frameManager;
     RenderThreadSync _sync;
+    PresentationOwnership _presentationOwnership = PresentationOwnership::GameLoop;
     bool _renderFrameInFlight = false;
     uint64_t _simTick = 0;
     uint64_t _pendingSimTick = 0;

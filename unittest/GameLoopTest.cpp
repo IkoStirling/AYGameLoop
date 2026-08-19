@@ -48,6 +48,17 @@ TEST_CASE(NoLimitFPS) {
     CHECK_TRUE(true);
 }
 
+TEST_CASE(PresentationOwnershipCanBeDelegatedToHost) {
+    auto& loop = GameLoop::instance();
+    loop.setPresentationOwnership(PresentationOwnership::ExternalHost);
+    CHECK_TRUE(loop.getPresentationOwnership()
+               == PresentationOwnership::ExternalHost);
+
+    loop.setPresentationOwnership(PresentationOwnership::GameLoop);
+    CHECK_TRUE(loop.getPresentationOwnership()
+               == PresentationOwnership::GameLoop);
+}
+
 TEST_CASE(GetCurrentFPS) {
     auto& loop = GameLoop::instance();
     float fps = loop.getCurrentFPS();

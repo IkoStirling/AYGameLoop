@@ -175,7 +175,8 @@ void GameLoop::run() {
     _paused.store(false);
     _renderFrameInFlight = false;
 
-    if (_sync.isRenderThreadEnabled()) {
+    if (_presentationOwnership == PresentationOwnership::GameLoop
+        && _sync.isRenderThreadEnabled()) {
         _sync.startRenderThread();
         // Spin until render thread is parked on waitForLogicComplete().
         // RenderThreadSync sets _renderThreadRunning BEFORE spawning, so
@@ -227,7 +228,9 @@ void GameLoop::mainLoop() {
 }
 
 void GameLoop::tickOnceFrame(bool fixedStepDelta) {
-    if (_sync.isRenderThreadEnabled() && _renderFrameInFlight) {
+    if (_presentationOwnership == PresentationOwnership::GameLoop
+        && _sync.isRenderThreadEnabled()
+        && _renderFrameInFlight) {
         _sync.waitForRenderComplete();
         _renderFrameInFlight = false;
     }
@@ -279,7 +282,8 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta) {
     ayt::event::EventBus::instance().emit(endEvent);
 
     submitRenderCommands();
-    if (_sync.isRenderThreadEnabled()) {
+    if (_presentationOwnership == PresentationOwnership::GameLoop
+        && _sync.isRenderThreadEnabled()) {
         _sync.signalLogicComplete();
         _renderFrameInFlight = true;
     }
@@ -334,7 +338,16 @@ void GameLoop::endPlaySession() {
     _running.store(false);
     _paused.store(false);
     _frameManager.setNoLimitFPS(false);
+    _presentationOwnership = PresentationOwnership::GameLoop;
     ayt::log::info("[GameLoop] Editor play session ended");
+}
+
+bool GameLoop::prepareHostedSession() {
+    return preparePlaySession();
+}
+
+void GameLoop::endHostedSession() {
+    endPlaySession();
 }
 
 void GameLoop::tickOnce() {
@@ -741,6 +754,10 @@ bool GameLoop::runPhaseLayers(
 }
 
 void GameLoop::submitRenderCommands() {
+    if (_presentationOwnership != PresentationOwnership::GameLoop) {
+        return;
+    }
+
     if (!_sync.isRenderThreadEnabled()) {
         _sync.invokeRenderCallback();
     }
@@ -1005,6 +1022,34 @@ void GameLoop::offUpdate(uint64_t listenerId) {
 
 void GameLoop::setRenderThreadEnabled(bool enabled) {
     _sync.setRenderThreadEnabled(enabled);
+}
+
+void GameLoop::setPresentationOwnership(PresentationOwnership ownership) {
+    if (_presentationOwnership == ownership) {
+        return;
+    }
+
+    // Switching ownership while a render frame is in flight would leave the
+    // single render packet's consumer ambiguous. This setter is main-thread
+    // only; complete the previous GameLoop-owned consumption first.
+    if (_presentationOwnership == PresentationOwnership::GameLoop
+        && _sync.isRenderThreadEnabled()
+        && _renderFrameInFlight) {
+        _sync.waitForRenderComplete();
+        _renderFrameInFlight = false;
+    }
+
+    if (ownership == PresentationOwnership::ExternalHost) {
+        _sync.stopRenderThread();
+    }
+
+    _presentationOwnership = ownership;
+
+    if (ownership == PresentationOwnership::GameLoop
+        && _playSessionActive.load()
+        && _sync.isRenderThreadEnabled()) {
+        _sync.startRenderThread();
+    }
 }
 
 void GameLoop::setRenderCallback(RenderThreadSync::RenderThreadCallback callback) {

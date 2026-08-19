@@ -47,6 +47,15 @@ enum class ClockDomain : uint8_t {
     RealWall
 };
 
+// Decides who consumes the immutable render packet produced by the
+// Presentation phase. Standalone applications normally leave this at
+// GameLoop; editor hosts select ExternalHost and compose the packet with
+// their own chrome before presenting.
+enum class PresentationOwnership : uint8_t {
+    GameLoop,
+    ExternalHost
+};
+
 struct FrameContext {
     FramePhase phase = FramePhase::Platform;
     uint64_t frameCount = 0;
@@ -153,11 +162,22 @@ public:
     virtual void resume() = 0;           // any-thread safe
 
     // Editor / replay: drive simulation from host message loop instead of run().
+    // These historical names remain the low-level compatibility API.
     [[nodiscard]] virtual bool preparePlaySession() = 0;
     virtual void endPlaySession() = 0;
     virtual void tickOnce() = 0;
     virtual void stepOnce() = 0;
     [[nodiscard]] virtual bool isPlaySessionActive() const = 0;
+
+    // Host-facing lifecycle names. A hosted session initializes the engine
+    // runtime, but does not itself mean that an editor Play scene is active.
+    // The default adapters preserve compatibility for existing loop impls.
+    [[nodiscard]] virtual bool prepareHostedSession() {
+        return preparePlaySession();
+    }
+    virtual void endHostedSession() {
+        endPlaySession();
+    }
 
     virtual void setTargetFPS(float fps) = 0;
     virtual void setFixedTimestep(float dt) = 0;
@@ -217,6 +237,8 @@ public:
 
     // Render-thread controls
     virtual void setRenderThreadEnabled(bool enabled) = 0;
+    virtual void setPresentationOwnership(PresentationOwnership ownership) = 0;
+    [[nodiscard]] virtual PresentationOwnership getPresentationOwnership() const = 0;
     virtual void setRenderCallback(
         std::function<void()> callback) = 0;
 

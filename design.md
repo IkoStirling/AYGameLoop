@@ -551,12 +551,18 @@ private:
 ### 4.1 IGameLoop
 
 ```cpp
+enum class PresentationOwnership : uint8_t {
+    GameLoop,     // GameLoop submits its own render frame
+    ExternalHost  // host composites and submits the frame
+};
+
 class IGameLoop {
 public:
     virtual ~IGameLoop() = default;
 
     // Threading contract (see §8.5):
     //   - run / tickOnce / stepOnce / preparePlaySession / endPlaySession
+    //     / prepareHostedSession / endHostedSession
     //     and per-frame accessors (getDeltaTime, getFrameCount, ...) are
     //     **main-thread only**.
     //   - stop / pause / resume are any-thread safe (atomic flag).
@@ -574,9 +580,18 @@ public:
     virtual void resume() = 0;
     virtual bool preparePlaySession() = 0;  // editor / replay entry
     virtual void endPlaySession() = 0;
+    // Explicit names for a host that drives tickOnce itself.  The default
+    // adapters preserve the legacy play-session lifecycle.
+    virtual bool prepareHostedSession() { return preparePlaySession(); }
+    virtual void endHostedSession() { endPlaySession(); }
     virtual void tickOnce() = 0;            // drive from host message loop
     virtual void stepOnce() = 0;            // single fixed-step frame
     virtual bool isPlaySessionActive() const = 0;
+
+    // Who consumes the immutable render packet produced by Presentation.
+    // ExternalHost means GameLoop does not issue a separate render submission.
+    virtual void setPresentationOwnership(PresentationOwnership ownership) = 0;
+    virtual PresentationOwnership getPresentationOwnership() const = 0;
 
     // === 配置 ===
     virtual void setTargetFPS(float fps) = 0;
@@ -1040,7 +1055,7 @@ IGameLoop 的方法按线程归属分三档：
 
 | 方法 | 线程 |
 |---|---|
-| `run / tickOnce / stepOnce / preparePlaySession / endPlaySession` | main only |
+| `run / tickOnce / stepOnce / preparePlaySession / endPlaySession / prepareHostedSession / endHostedSession / setPresentationOwnership` | main only |
 | `stop / pause / resume` | any thread（atomic flag，下一帧顶部观测） |
 | `registerSubSystem / unregister / onUpdate / offUpdate` | any thread（mutex） |
 | `getDeltaTime / getFrameCount / getCurrentFPS / …` | main only |
