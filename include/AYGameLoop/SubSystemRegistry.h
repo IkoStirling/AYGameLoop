@@ -8,6 +8,7 @@
 #include <string>
 #include <memory>
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 
 namespace ayt::game
@@ -62,6 +63,7 @@ private:
         std::optional<std::vector<std::string>> depOverride;
         int32_t priorityOverride = 0;
         bool hasPriorityOverride = false;
+        uint64_t registrationOrder = 0;
     };
 
     // Kahn's algorithm for topological sort.
@@ -72,6 +74,7 @@ private:
     std::unordered_map<std::string, Entry> _systems;
     mutable std::vector<ISubSystem*> _executionOrder;
     mutable bool _dirty = true;
+    uint64_t _nextRegistrationOrder = 0;
 };
 
 } // namespace ayt::game

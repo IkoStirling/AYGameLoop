@@ -38,7 +38,8 @@ bool SubSystemRegistry::registerSubSystem(ISubSystem* system) {
     _systems[key] = Entry{std::move(incoming),
                           std::nullopt,
                           0,
-                          false};
+                          false,
+                          _nextRegistrationOrder++};
     _dirty = true;
     ayt::log::info("[SubSystemRegistry] Registered: %s", name);
     return true;
@@ -76,6 +77,7 @@ bool SubSystemRegistry::registerSubSystem(ISubSystem* system,
     e.depOverride = std::move(ownedDependencies);
     e.priorityOverride = priority;
     e.hasPriorityOverride = true;
+    e.registrationOrder = _nextRegistrationOrder++;
 
     _systems[key] = std::move(e);
     _dirty = true;
@@ -110,6 +112,7 @@ void SubSystemRegistry::clearAll() {
     _systems.clear();
     _executionOrder.clear();
     _dirty = true;
+    _nextRegistrationOrder = 0;
 }
 
 ISubSystem* SubSystemRegistry::findSubSystem(const char* name) const {
@@ -197,20 +200,28 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
 
     if (invalidStrictDependency) return {};
 
-    // Min-heap by priority descending; stable by insertion order on ties.
+    // Highest priority first; registration order is the deterministic
+    // tie-breaker. Iterating _systems cannot provide that guarantee because
+    // it is an unordered_map.
     struct PrioItem {
         int32_t priority;
+        uint64_t registrationOrder;
         ISubSystem* system;
     };
     auto cmp = [](const PrioItem& a, const PrioItem& b) {
-        // std::priority_queue is max-heap by default; we want higher priority first.
-        return a.priority < b.priority;
+        if (a.priority != b.priority) {
+            return a.priority < b.priority;
+        }
+        return a.registrationOrder > b.registrationOrder;
     };
     std::priority_queue<PrioItem, std::vector<PrioItem>, decltype(cmp)> zeroDegree(cmp);
 
     for (const auto& pair : _systems) {
         if (inDegree[pair.first] == 0) {
-            zeroDegree.push({effectivePriority(pair.second), pair.second.system.get()});
+            zeroDegree.push({
+                effectivePriority(pair.second),
+                pair.second.registrationOrder,
+                pair.second.system.get()});
         }
     }
 
@@ -225,7 +236,10 @@ std::vector<ISubSystem*> SubSystemRegistry::topologicalSort() const {
             if (inDegree[neighbor] == 0) {
                 auto it = _systems.find(neighbor);
                 if (it != _systems.end()) {
-                    zeroDegree.push({effectivePriority(it->second), it->second.system.get()});
+                    zeroDegree.push({
+                        effectivePriority(it->second),
+                        it->second.registrationOrder,
+                        it->second.system.get()});
                 }
             }
         }

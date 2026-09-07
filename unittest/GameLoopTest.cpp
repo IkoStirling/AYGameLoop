@@ -868,6 +868,36 @@ TEST_CASE(TopologicalOrderRespectsDependencies) {
     reg.clearAll();
 }
 
+TEST_CASE(EqualPriorityPreservesRegistrationOrder) {
+    auto& reg = SubSystemRegistry::instance();
+    reg.clearAll();
+
+    constexpr const char* names[] = {
+        "TieZulu",
+        "TieAlpha",
+        "TieKilo",
+        "TieBravo",
+        "TieYankee",
+        "TieCharlie",
+        "TieMike",
+        "TieDelta"
+    };
+    for (const char* name : names) {
+        reg.registerSubSystem(new MockSubSystem(name, 100));
+    }
+
+    const auto order = reg.getExecutionOrder();
+    CHECK_INT_EQ(static_cast<int>(order.size()),
+                 static_cast<int>(std::size(names)));
+    for (std::size_t index = 0;
+         index < order.size() && index < std::size(names);
+         ++index) {
+        CHECK_TRUE(std::string(order[index]->getName()) == names[index]);
+    }
+
+    reg.clearAll();
+}
+
 TEST_CASE(CircularDependencyRefused) {
     auto& reg = SubSystemRegistry::instance();
     reg.clearAll();

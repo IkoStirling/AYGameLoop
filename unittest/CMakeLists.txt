@@ -5,6 +5,7 @@ project(AYGameLoop_Test)
 set(SOURCES
     TestMain.cpp
     GameLoopTest.cpp
+    SubSystemModuleTest.cpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES})

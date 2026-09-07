@@ -5,6 +5,7 @@ project(AYGameLoop)
 set(SOURCES
     src/AYGameLoopImpl.cpp
     src/AYSubSystemRegistry.cpp
+    src/AYSubSystemModule.cpp
     src/AYFrameManager.cpp
     src/AYFrameStats.cpp
     src/AYFrameInterpolator.cpp
@@ -21,6 +22,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 )
 
 target_link_libraries(${PROJECT_NAME} PUBLIC
+    AY::Module
     AYCore
     AYPlatform
     AYTime
