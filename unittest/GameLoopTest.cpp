@@ -452,7 +452,30 @@ TEST_CASE(CompletionBeforeWaitIsRemembered) {
 TEST_CASE(SignalWakesWaiter) {
     RenderThreadSync sync;
     sync.setRenderThreadEnabled(true);
-    sync.setRenderCallback([]() {});
+
+    // Park the real render consumer after it takes the first request. This
+    // leaves the second request for the explicit waiter and removes the race
+    // where the render loop could consume both counting-semaphore tokens.
+    std::atomic<bool> renderCallbackEntered{false};
+    std::atomic<bool> releaseRenderCallback{false};
+    sync.setRenderCallback([&]() {
+        renderCallbackEntered.store(true);
+        while (!releaseRenderCallback.load()) {
+            ayt::Thread::sleep(0.001f);
+        }
+    });
+
+    sync.startRenderThread();
+    sync.signalLogicComplete();
+    for (int i = 0; i < 1000 && !renderCallbackEntered.load(); ++i) {
+        ayt::Thread::sleep(0.001f);
+    }
+    CHECK_TRUE(renderCallbackEntered.load());
+    if (!renderCallbackEntered.load()) {
+        releaseRenderCallback.store(true);
+        sync.stopRenderThread();
+        return;
+    }
 
     std::atomic<bool> woken{false};
     std::thread waiter([&]() {
@@ -460,21 +483,24 @@ TEST_CASE(SignalWakesWaiter) {
         woken.store(true);
     });
 
-    sync.startRenderThread();
-    // There are two consumers here (the render thread and this waiter), so
-    // publish one request token for each.
-    ayt::Thread::sleep(0.01f);
-    sync.signalLogicComplete();
+    // The render thread is parked in its callback, so this token can only be
+    // consumed by the waiter under test.
     sync.signalLogicComplete();
 
     // Bounded wait for the waiter.
     for (int i = 0; i < 100 && !woken.load(); ++i) {
         ayt::Thread::sleep(0.001f);
     }
-    CHECK_TRUE(woken.load());
-
+    const bool signalWokeWaiter = woken.load();
+    releaseRenderCallback.store(true);
+    if (!signalWokeWaiter) {
+        // Unblock a failed waiter before joining so a failed assertion cannot
+        // strand the entire test process.
+        sync.stopRenderThread();
+    }
     if (waiter.joinable()) waiter.join();
     sync.stopRenderThread();
+    CHECK_TRUE(signalWokeWaiter);
 }
 
 TEST_SUITE_END
