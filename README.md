@@ -60,3 +60,15 @@ ratio setter 在帧回调中返回 false，旧 float setter 在回调中延后�
 验证入口：`Test_DeterministicTimestep.cpp`、`AYEntity_DeterministicHostTests`。
 
 Sim/Present 时间纪律和 SubSystem 顺序见 [design.md](design.md)。
+
+## 可恢复固定步屏障（2026-10-07）
+
+`ISubSystem::tickResult` 默认适配 tickChecked：true→Completed，false→Failed。
+显式返回 Blocked 只允许固定阶段，停止本步、不推进 simTick/SimTickEvent，暂停
+并清除固定步欠账，保持 Presentation/Egress；恢复后由 owner 在帧边界 resume/step。
+非固定 Blocked 与 Failed 仍终止主循环；早期阶段副作用不自动回滚。
+stepOnce 清除固定欠账、只执行一步，拒绝帧内重入；本帧中新暂停会结束固定批次。
+并行层 Failed 优先于 Blocked，下一层不执行。显式 requiresOwnerThread 的 SubSystem
+使所在 layer 串行执行在 Host caller 上，适用于 Scene/Input/确定性会话访问。World/Bridge 保持原有暂停规则。
+`Test_DeterministicTimestep.cpp` 覆盖屏障恢复、单步欠账与嵌套固定批次。
+标准 Scene 会话使用[第七阶段](../../AYDocs/DETERMINISTIC-HOST-STAGE7.md)。

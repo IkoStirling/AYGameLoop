@@ -132,6 +132,9 @@ public:
     virtual const char* getName() const = 0;
     virtual const SubSystemDescriptor& getDescriptor() const = 0;
     virtual bool initialize() = 0;
+    /// Opt-in thread affinity. A phase layer containing this subsystem executes
+    /// serially on the Host caller thread, even when parallel scheduling is enabled.
+    virtual bool requiresOwnerThread() const noexcept { return false; }
     virtual void update(float deltaTime) = 0;
     virtual void fixedUpdate(float fixedDeltaTime) = 0;
     virtual void tick(FramePhase phase, const FrameContext& context) {
@@ -140,6 +143,14 @@ public:
         } else {
             update(context.deltaTime);
         }
+    }
+    enum class TickResult { Completed, Blocked, Failed };
+    /// Typed phase result: Blocked is a recoverable fixed-step barrier only.
+    /// GameLoop pauses, discards fixed debt and commits no tick; Presentation/Egress
+    /// remain available. Non-fixed Blocked and Failed retain fatal-exit semantics.
+    /// Recovery is explicit at an owner-thread frame boundary before resume/step.
+    virtual TickResult tickResult(FramePhase phase, const FrameContext& context) {
+        return tickChecked(phase, context) ? TickResult::Completed : TickResult::Failed;
     }
     // Status-aware phase entry. Existing subsystems inherit the adapter;
     // barrier-owning systems can fail a phase without committing its sim tick.

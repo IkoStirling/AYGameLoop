@@ -234,6 +234,8 @@ void FrameManager::setNoLimitFPS(bool noLimit) {
     _nextFrameDeadlineUs = static_cast<double>(_clock->nowUs()) + _frameIntervalUs;
 }
 
+void FrameManager::discardFixedDebt() { _accumulator = 0.0; }
+
 void FrameManager::reset() {
     _frameCount = 0;
     _elapsedTime = 0.0f;

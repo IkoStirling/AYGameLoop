@@ -4,6 +4,7 @@
 #include <AYTest.h>
 #include <cfenv>
 #include <vector>
+#include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <xmmintrin.h>
 #endif
@@ -14,18 +15,25 @@ struct Capture final : ISubSystem {
     SubSystemDescriptor desc;
     std::vector<FrameContext> contexts;
     bool failPhysics = false, mutate = false, nested = false, ratioAccepted = false;
+    bool blocked = false;
+    bool ownerThread = false, wrongThread = false;
+    std::thread::id owner=std::this_thread::get_id();
+    unsigned presentations = 0;
     Capture() {
         desc.name = "TypedFixedCapture";
         desc.phases = phaseBit(FramePhase::FixedPrePhysics) | phaseBit(FramePhase::FixedPhysics)
-            | phaseBit(FramePhase::FixedPostPhysics);
+            | phaseBit(FramePhase::FixedPostPhysics) | phaseBit(FramePhase::Presentation);
     }
     const char* getName() const override { return desc.name; }
     const SubSystemDescriptor& getDescriptor() const override { return desc; }
     bool initialize() override { return true; }
+    bool requiresOwnerThread() const noexcept override {return ownerThread;}
     void update(float) override {}
     void fixedUpdate(float) override {}
     void shutdown() override {}
     bool tickChecked(FramePhase phase, const FrameContext& context) override {
+        if(ownerThread && std::this_thread::get_id()!=owner)wrongThread=true;
+        if(phase==FramePhase::Presentation){++presentations;return true;}
         contexts.push_back(context);
         if (phase == FramePhase::FixedPrePhysics && mutate) {
             auto& loop = GameLoop::instance();
@@ -34,6 +42,10 @@ struct Capture final : ISubSystem {
         }
         if (phase == FramePhase::FixedPrePhysics && nested) GameLoop::instance().stepOnce();
         return !(failPhysics && phase == FramePhase::FixedPhysics);
+    }
+    TickResult tickResult(FramePhase phase,const FrameContext& context) override {
+        if(blocked && phase==FramePhase::FixedPrePhysics)return TickResult::Blocked;
+        return ISubSystem::tickResult(phase,context);
     }
 };
 struct Session {
@@ -154,6 +166,33 @@ TEST_CASE(phase_failure_emits_no_commit_and_preserves_tick_number) {
     const auto tick=s.loop.getSimTick(); s.loop.stepOnce();
     CHECK(s.loop.getSimTick()==tick && s.events.empty() && s.loop.getFixedTicksLastFrame()==0);
     CHECK(s.capture->contexts.size()==2);
+}
+TEST_CASE(recoverable_barrier_pauses_without_committing_and_keeps_presentation_alive) {
+    Session s;CHECK_TRUE(s.prepared);s.capture->blocked=true;const auto tick=s.loop.getSimTick();
+    s.loop.tickHostedFrame({1.0f/16.0f,1,1});
+    CHECK(s.loop.getSimTick()==tick && s.events.empty() && s.capture->presentations==1);
+    s.loop.tickHostedFrame({1.0f/16.0f,2,2});
+    CHECK(s.loop.getSimTick()==tick && s.capture->presentations==2);
+    s.capture->blocked=false;s.loop.stepOnce();
+    CHECK(s.loop.getSimTick()==tick+1 && s.events.size()==1 && s.capture->presentations==3);
+    s.loop.tickHostedFrame({1.0f/16.0f,3,3});CHECK(s.loop.getSimTick()==tick+1);
+    s.loop.resume();s.loop.tickHostedFrame({1.0f/64.0f,4,4});CHECK(s.loop.getSimTick()==tick+2);
+}
+TEST_CASE(single_step_discards_preserved_debt_and_nested_steps_do_not_clear_outer_batch) {
+    Session s;CHECK_TRUE(s.prepared);s.loop.setFixedBacklogPolicy(FixedBacklogPolicy::Preserve);
+    s.loop.setMaxFixedUpdatesPerFrame(2);s.loop.tickHostedFrame({1.0f/16.0f,1,1});
+    const auto tick=s.loop.getSimTick();s.loop.pause();s.loop.stepOnce();CHECK(s.loop.getSimTick()==tick+1);
+    s.loop.resume();s.capture->nested=true;s.loop.tickHostedFrame({1.0f/32.0f,2,2});
+    CHECK(s.loop.getSimTick()==tick+3);
+    s.loop.setMaxFixedUpdatesPerFrame(8);s.loop.setFixedBacklogPolicy(FixedBacklogPolicy::Drop);
+}
+TEST_CASE(owner_affinity_is_respected_and_parallel_blocked_layer_remains_recoverable) {
+    Session s;CHECK_TRUE(s.prepared);s.loop.setParallelEnabled(true);s.capture->ownerThread=true;
+    const auto tick=s.loop.getSimTick();s.loop.stepOnce();
+    CHECK(!s.capture->wrongThread && s.loop.getSimTick()==tick+1);
+    s.capture->ownerThread=false;s.capture->blocked=true;s.loop.stepOnce();CHECK(s.loop.getSimTick()==tick+1);
+    s.capture->blocked=false;s.loop.stepOnce();CHECK(s.loop.getSimTick()==tick+2);
+    s.loop.setParallelEnabled(false);
 }
 TEST_CASE(configuration_cannot_split_a_fixed_batch_and_legacy_changes_wait_for_next_frame) {
     Session s; CHECK_TRUE(s.prepared); s.capture->mutate=true;

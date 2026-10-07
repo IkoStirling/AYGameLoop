@@ -1167,3 +1167,14 @@ IGameLoop 的方法按线程归属分三档：
 - [O3DE Tick System](https://docs.o3de.org/docs/user-guide/engine/tick/)
 - [Unreal Engine GameViewportClient](https://docs.unrealengine.com/en-US/Programming/Development/Architecture/UnrealArchitecture/)
 - [帧插值 (Frame Interpolation)](https://en.wikipedia.org/wiki/Motion_interpolation)
+
+## 受控固定步拒绝（2026-10-07）
+
+ISubSystem::TickResult 增加 Completed/Blocked/Failed，不改变既有 tickChecked 子类。
+requiresOwnerThread=true 的层先选择 Host caller 串行执行；其他 serial phase 立即返回结果；parallel layer 汇总两个原子标志，Failed 优先，层间屏障后
+返回。runPhase 仅对 fixed Blocked 设置 paused 并清零固定 accumulator，不设置
+shouldExit；non-fixed Blocked 和 Failed 保留 fatal。processFixedUpdates 不提交拒绝步，
+新暂停结束已提交批次；variable Gameplay/World 读取最新 paused，Presentation/Egress
+继续。丢弃 scheduling debt 不回滚先前 side effects 或 simTick；恢复由 subsystem owner
+负责。stepOnce 在外部帧边界丢弃旧固定欠账，帧内重入在改变 accumulator 前拒绝。
+控制协议测试在 Test_DeterministicTimestep，跨模块真实会话在 AYEntity Host tests。

@@ -97,6 +97,8 @@ public:
     void setNoLimitFPS(bool noLimit);
     [[nodiscard]] bool isNoLimitFPS() const { return _noLimitFPS; }
 
+    /// Cancel scheduling debt at a controlled barrier; retain clocks, stats and step.
+    void discardFixedDebt();
     void reset();
 
     const FrameStats& getFrameStats() const { return _frameStats.getStats(); }

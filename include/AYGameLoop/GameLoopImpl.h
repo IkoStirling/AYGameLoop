@@ -157,7 +157,7 @@ private:
     // Each layer's subsystems run concurrently; a subsystem in layer N+1
     // depends on every subsystem in layer N (its declared dependencies).
     std::vector<std::vector<ISubSystem*>> buildExecutionLayers(FramePhase phase) const;
-    [[nodiscard]] bool runPhaseLayers(
+    [[nodiscard]] ISubSystem::TickResult runPhaseLayers(
         FramePhase phase,
         const std::vector<std::vector<ISubSystem*>>& layers,
         bool paused);

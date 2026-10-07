@@ -293,7 +293,7 @@ void GameLoop::tickOnceFrame(bool fixedStepDelta,
         processFixedUpdates();
     }
     if (_shouldExit.load()) return;
-    processVariableUpdates(paused);
+    processVariableUpdates(paused || _paused.load());
     if (_shouldExit.load()) return;
 
     // Presentation and egress notifications are delivered at the final
@@ -389,14 +389,15 @@ void GameLoop::tickHostedFrame(const HostedFrameContext& context) {
 }
 
 void GameLoop::stepOnce() {
-    if (!_playSessionActive.load()) {
+    if (!_playSessionActive.load() || _frameInProgress) {
         return;
     }
 
     const bool wasPaused = _paused.load();
+    _frameManager.discardFixedDebt();
     _paused.store(false);
     tickOnceFrame(true);
-    _paused.store(wasPaused);
+    _paused.store(wasPaused || _paused.load());
 }
 
 void GameLoop::processFixedUpdates() {
@@ -423,6 +424,7 @@ void GameLoop::processFixedUpdates() {
         tickEvent.fixedStep = _frameManager.getFixedStep();
         ayt::event::EventBus::instance().emit(tickEvent);
         ayt::event::EventBus::instance().pump();
+        if (_paused.load()) break;
     }
     _fixedTicksLastFrame = static_cast<uint32_t>(completedCount);
     _frameManager.consumeFixedUpdates(completedCount);
@@ -487,7 +489,8 @@ bool GameLoop::runPhase(FramePhase phase, bool paused) {
     }
     const auto index = static_cast<size_t>(phase);
     const uint64_t startUs = ayt::time::Clock::performanceNowUs();
-    const bool succeeded = runPhaseLayers(phase, _phasePlans[index], paused);
+    const auto result = runPhaseLayers(phase, _phasePlans[index], paused);
+    const bool succeeded = result == ISubSystem::TickResult::Completed;
     const uint64_t endUs = ayt::time::Clock::performanceNowUs();
     const uint64_t elapsedUs = endUs >= startUs ? endUs - startUs : 0;
     PhaseTimingStats& timing = _phaseTiming[index];
@@ -495,7 +498,10 @@ bool GameLoop::runPhase(FramePhase phase, bool paused) {
     timing.totalTimeUs += elapsedUs;
     timing.lastTimeUs = elapsedUs;
     timing.maxTimeUs = std::max(timing.maxTimeUs, elapsedUs);
-    if (!succeeded) {
+    if (result == ISubSystem::TickResult::Blocked && isFixedPhase(phase)) {
+        _paused.store(true);
+        _frameManager.discardFixedDebt();
+    } else if (!succeeded) {
         ayt::log::error("[GameLoop] Fatal: subsystem failed in phase %u",
                         static_cast<unsigned>(phase));
         _shouldExit.store(true);
@@ -733,21 +739,19 @@ std::vector<std::vector<ISubSystem*>> GameLoop::buildExecutionLayers(FramePhase 
 
 // Run layers in series; within each layer, fan out subsystems to a TaskGraph
 // that runs them in parallel (no intra-layer dependencies).
-bool GameLoop::runPhaseLayers(
+ISubSystem::TickResult GameLoop::runPhaseLayers(
     FramePhase phase,
     const std::vector<std::vector<ISubSystem*>>& layers,
     bool paused) {
     for (const auto& layer : layers) {
         if (layer.empty()) continue;
 
-        if (!_parallelEnabled.load() || !_jobScheduler.isInitialized()) {
+        const bool ownerThread = std::any_of(layer.begin(), layer.end(),
+            [](const ISubSystem* system) { return system->requiresOwnerThread(); });
+        if (ownerThread || !_parallelEnabled.load() || !_jobScheduler.isInitialized()) {
             for (ISubSystem* system : layer) {
-                if (!system->tickChecked(
-                        phase, frameContextFor(phase, *system, paused))) {
-                    ayt::log::error("[GameLoop] Subsystem '%s' failed",
-                                    system->getName());
-                    return false;
-                }
+                const auto result = system->tickResult(phase, frameContextFor(phase, *system, paused));
+                if (result != ISubSystem::TickResult::Completed) return result;
             }
             continue;
         }
@@ -755,25 +759,21 @@ bool GameLoop::runPhaseLayers(
         auto* graph = _jobScheduler.createGraph();
         if (!graph) {
             for (ISubSystem* system : layer) {
-                if (!system->tickChecked(
-                        phase, frameContextFor(phase, *system, paused))) {
-                    ayt::log::error("[GameLoop] Subsystem '%s' failed",
-                                    system->getName());
-                    return false;
-                }
+                const auto result = system->tickResult(phase, frameContextFor(phase, *system, paused));
+                if (result != ISubSystem::TickResult::Completed) return result;
             }
             continue;
         }
 
-        std::atomic<bool> layerSucceeded{true};
+        std::atomic<bool> layerBlocked{false}, layerFailed{false};
         // Emplace one node per subsystem, NO intra-layer dependencies → all parallel.
         for (ISubSystem* s : layer) {
             const FrameContext context = frameContextFor(phase, *s, paused);
             auto& node = graph->emplace(
-                ayt::task::makeTask([s, phase, context, &layerSucceeded]() {
-                    if (!s->tickChecked(phase, context)) {
-                        layerSucceeded.store(false, std::memory_order_release);
-                    }
+                ayt::task::makeTask([s, phase, context, &layerBlocked, &layerFailed]() {
+                    const auto result = s->tickResult(phase, context);
+                    if (result == ISubSystem::TickResult::Blocked) layerBlocked.store(true, std::memory_order_release);
+                    else if (result != ISubSystem::TickResult::Completed) layerFailed.store(true, std::memory_order_release);
                 }),
                 s->getName()
             );
@@ -782,9 +782,10 @@ bool GameLoop::runPhaseLayers(
 
         _jobScheduler.executeAndWait(graph);
         delete graph;
-        if (!layerSucceeded.load(std::memory_order_acquire)) return false;
+        if (layerFailed.load(std::memory_order_acquire)) return ISubSystem::TickResult::Failed;
+        if (layerBlocked.load(std::memory_order_acquire)) return ISubSystem::TickResult::Blocked;
     }
-    return true;
+    return ISubSystem::TickResult::Completed;
 }
 
 void GameLoop::submitRenderCommands() {
