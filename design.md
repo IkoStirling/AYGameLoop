@@ -264,6 +264,28 @@ race。设计原则：**互相独立的子系统放同一 layer**；有数据依
 
 ## 3. 时间管理系统
 
+### 3.0 软件 binary32 固定步（2026-10-07）
+
+`FixedTimestep` 是不可变数值输入。默认 1/60；ratio 先以 gcd 约分，正整数
+项必须 <=2^24，先精确转为 DetFloat32，再以 profile 1 软件除法一次舍入。
+native factory 仅复制有限正 float bits，约分项为 0/0，用于兼容边界。
+FrameManager 保存该值和一致的 native float 副本；无效 ratio 返回 false
+且不改变配置或 accumulator。旧非法 float 仍回退到默认 1/60。
+
+GameLoop 在主线程配置；ratio 变更拒绝发生在帧执行中，旧 float setter
+延后到下一帧初始边界。帧作用域 guard 含所有 early return，并拒绝嵌套
+frame；三种固定 phase 与同批所有 tick 看到同一配置。FrameContext 的
+optional fixedStep 和成功提交后 SimTickEvent 的 optional fixedStep 都由
+Host 设置；手工 legacy context/event 可为空。ISubSystem 默认 float adapter
+保持可用，Entity FixedPrePhysics 直接传 DetFloat32 给 World。
+
+initialize 重置帧时钟与未消费积压，保留 fixed 配置；simTick 单调不重置。
+固定 count 在 double 中先 clamp 到预算再转 int，避免极小 legacy dt 的
+超范围转换。Wall-clock accumulator、timeScale、backlog policy 仍为 native
+调度，它们决定执行多少 tick；本实现保证每个已选 tick 的数值输入，不能
+替代 lockstep 输入门禁或 rollback。phase 失败不提交 simTick/事件，也不
+自动撤销之前 phase 的副作用。旋转、物理与脚本确定性仍待扩展。
+
 ### 3.1 DeltaTime 平滑
 
 防止卡顿后物理爆炸。计算平滑后的 deltaTime：

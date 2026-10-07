@@ -55,6 +55,10 @@ public:
 
     void setTargetFPS(float fps) override;
     void setFixedTimestep(float dt) override;
+    [[nodiscard]] bool setFixedTimestepRatio(uint32_t numerator, uint32_t denominator) override;
+    [[nodiscard]] std::optional<FixedTimestep> getFixedStep() const override {
+        return _frameManager.getFixedStep();
+    }
     void setTimeScale(float scale) override;
     void setNoLimitFPS(bool noLimit) override;
     void setMaxFixedUpdatesPerFrame(uint32_t count) override {
@@ -183,6 +187,8 @@ private:
     uint64_t _hostFrameIndex = 0;
     uint64_t _inputFrameIndex = 0;
     uint32_t _fixedTicksLastFrame = 0;
+    bool _frameInProgress = false;
+    std::optional<float> _pendingNativeFixedTimestep;
 
     std::atomic<bool> _running{false};
     std::atomic<bool> _paused{false};

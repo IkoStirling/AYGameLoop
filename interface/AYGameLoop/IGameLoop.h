@@ -2,6 +2,7 @@
 
 #include <AYCore.h>
 #include <AYGameLoop/FramePolicy.h>
+#include <AYGameLoop/FixedTimestep.h>
 #include <cstdint>
 #include <type_traits>
 #include <vector>
@@ -79,6 +80,8 @@ struct FrameContext {
     float realWallDeltaTime = 0.0f;
     float interpolationAlpha = 0.0f;
     bool paused = false;
+    /// Host-owned fixed numeric input; nullopt only for manually built legacy contexts.
+    std::optional<FixedTimestep> fixedStep;
 };
 
 struct PhaseTimingStats {
@@ -197,7 +200,15 @@ public:
     }
 
     virtual void setTargetFPS(float fps) = 0;
+    /// Explicit native fixed-step input; invalid values fall back to software 1/60.
+    /// Main thread only. Calls during a frame apply at the next frame boundary.
     virtual void setFixedTimestep(float dt) = 0;
+    /// Configure software binary32 seconds from a reduced integer ratio. Main thread only.
+    /// Zero or reduced terms > 2^24 fail without mutation; rejected during a frame.
+    /// Retained across session initialization. Old loop implementations return false.
+    [[nodiscard]] virtual bool setFixedTimestepRatio(uint32_t, uint32_t) { return false; }
+    /// Current immutable numeric input, if supported by this loop implementation.
+    [[nodiscard]] virtual std::optional<FixedTimestep> getFixedStep() const { return std::nullopt; }
     virtual void setTimeScale(float scale) = 0;
     virtual void setNoLimitFPS(bool noLimit) = 0;
     virtual void setMaxFixedUpdatesPerFrame(uint32_t count) = 0;

@@ -5,6 +5,7 @@ project(AYGameLoop_Test)
 set(SOURCES
     TestMain.cpp
     GameLoopTest.cpp
+    Test_DeterministicTimestep.cpp
     SubSystemModuleTest.cpp
 )
 

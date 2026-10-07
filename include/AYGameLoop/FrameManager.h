@@ -6,6 +6,7 @@
 #include <AYGameLoop/FramePolicy.h>
 #include <AYGameLoop/FrameStats.h>
 #include <AYGameLoop/FrameInterpolator.h>
+#include <AYGameLoop/FixedTimestep.h>
 #include <cstdint>
 
 namespace ayt::game
@@ -24,6 +25,9 @@ public:
     // dt is clamped to (>0); <=0 falls back to 1/60.
     void setFixedTimestep(float dt);
     [[nodiscard]] float getFixedTimestep() const { return _fixedDt; }
+    /// Configure a supported rational step atomically; failure leaves timing unchanged.
+    [[nodiscard]] bool setFixedTimestepRatio(uint32_t numerator, uint32_t denominator);
+    [[nodiscard]] FixedTimestep getFixedStep() const { return _fixedStep; }
 
     // scale is clamped to >= 0; <0 falls back to 1.
     void setTimeScale(float scale);
@@ -104,7 +108,8 @@ private:
                             bool advanceGameClock);
 
     float _targetFPS = 60.0f;
-    float _fixedDt = 1.0f / 60.0f;
+    FixedTimestep _fixedStep;
+    float _fixedDt = _fixedStep.nativeDeltaTime();
     float _timeScale = 1.0f;
 
     float _elapsedTime = 0.0f;

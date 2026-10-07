@@ -7,6 +7,7 @@
 // in priority order (Critical → Low). See AYEventSystem design.md §3-§4.
 
 #include <AYEventSystem/EventPriority.h>
+#include <AYGameLoop/FixedTimestep.h>
 #include <cstdint>
 
 namespace ayt::game
@@ -112,6 +113,9 @@ struct SimTickEvent {
     uint64_t simTick = 0;
     float fixedDeltaTime = 0.0f;
     uint64_t frameCount = 0;
+    /// Same immutable fixed input as all three phases of this committed tick.
+    /// nullopt for events manually constructed through the legacy constructor.
+    std::optional<FixedTimestep> fixedStep;
 
     SimTickEvent() = default;
     SimTickEvent(uint64_t tick, float fixedDt, uint64_t frame)

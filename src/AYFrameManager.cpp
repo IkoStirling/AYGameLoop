@@ -9,7 +9,6 @@ namespace ayt::game
 
 FrameManager::FrameManager(ayt::time::IMonotonicClock* clock)
     : _targetFPS(60.0f)
-    , _fixedDt(1.0f / 60.0f)
     , _timeScale(1.0f)
     , _elapsedTime(0.0f)
     , _frameCount(0)
@@ -37,7 +36,16 @@ void FrameManager::setTargetFPS(float fps) {
 }
 
 void FrameManager::setFixedTimestep(float dt) {
-    _fixedDt = std::isfinite(dt) && dt > 0.0f ? dt : 1.0f / 60.0f;
+    _fixedStep = FixedTimestep::fromNative(dt).value_or(FixedTimestep{});
+    _fixedDt = _fixedStep.nativeDeltaTime();
+}
+
+bool FrameManager::setFixedTimestepRatio(uint32_t numerator, uint32_t denominator) {
+    const auto step = FixedTimestep::fromRatio(numerator, denominator);
+    if (!step) return false;
+    _fixedStep = *step;
+    _fixedDt = _fixedStep.nativeDeltaTime();
+    return true;
 }
 
 void FrameManager::setTimeScale(float scale) {
@@ -144,11 +152,10 @@ float FrameManager::getInterpolationFactor() const {
 
 int FrameManager::getFixedUpdateCount() const {
     double fixedDtSeconds = _fixedDt;
-    int count = static_cast<int>(std::floor(_accumulator / fixedDtSeconds));
-
-    // Cap per-frame fixed steps to avoid death-spiral after stalls.
+    const double count = std::floor(_accumulator / fixedDtSeconds);
+    // Bound in double before conversion, including extreme legacy native dt.
     const int maximum = static_cast<int>(_maxFixedUpdatesPerFrame);
-    return count > maximum ? maximum : count;
+    return count >= maximum ? maximum : static_cast<int>(count);
 }
 
 void FrameManager::setMaxFixedUpdatesPerFrame(uint32_t count) {

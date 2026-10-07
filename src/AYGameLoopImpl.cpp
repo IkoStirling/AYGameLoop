@@ -32,8 +32,10 @@ bool GameLoop::initialize() {
     ayt::log::info("[GameLoop] Initializing...");
 
     _frameManager.setTargetFPS(60.0f);
-    _frameManager.setFixedTimestep(1.0f / 60.0f);
     _frameManager.setTimeScale(1.0f);
+    // A new session starts with no wall-clock debt from the previous World.
+    // Numeric fixed-step configuration is retained; simTick remains monotonic.
+    _frameManager.reset();
 
     if (_parallelEnabled.load()) {
         if (!_jobScheduler.initialize()) {
@@ -229,6 +231,16 @@ void GameLoop::mainLoop() {
 
 void GameLoop::tickOnceFrame(bool fixedStepDelta,
                              const HostedFrameContext* hostedFrame) {
+    if (_frameInProgress) return;
+    if (_pendingNativeFixedTimestep) {
+        _frameManager.setFixedTimestep(*_pendingNativeFixedTimestep);
+        _pendingNativeFixedTimestep.reset();
+    }
+    struct FrameGuard {
+        bool& active;
+        explicit FrameGuard(bool& value) : active(value) { active = true; }
+        ~FrameGuard() { active = false; }
+    } guard(_frameInProgress);
     if (_presentationOwnership == PresentationOwnership::GameLoop
         && _sync.isRenderThreadEnabled()
         && _renderFrameInFlight) {
@@ -408,6 +420,7 @@ void GameLoop::processFixedUpdates() {
         ++completedCount;
 
         SimTickEvent tickEvent(_simTick, fixedDt, frameCount);
+        tickEvent.fixedStep = _frameManager.getFixedStep();
         ayt::event::EventBus::instance().emit(tickEvent);
         ayt::event::EventBus::instance().pump();
     }
@@ -453,6 +466,7 @@ FrameContext GameLoop::frameContextFor(FramePhase phase,
     context.hostFrameIndex = _hostFrameIndex;
     context.inputFrameIndex = _inputFrameIndex;
     context.fixedDeltaTime = _frameManager.getFixedTimestep();
+    context.fixedStep = _frameManager.getFixedStep();
     context.gameDeltaTime = paused ? 0.0f : _frameManager.getScaledDeltaTime();
     context.unscaledDeltaTime = _frameManager.getUnscaledDeltaTime();
     context.realWallDeltaTime = _frameManager.getRealDeltaTime();
@@ -948,7 +962,19 @@ void GameLoop::setTargetFPS(float fps) {
 }
 
 void GameLoop::setFixedTimestep(float dt) {
+    if (_frameInProgress) {
+        _pendingNativeFixedTimestep = dt;
+        return;
+    }
+    _pendingNativeFixedTimestep.reset();
     _frameManager.setFixedTimestep(dt);
+}
+
+bool GameLoop::setFixedTimestepRatio(uint32_t numerator, uint32_t denominator) {
+    if (_frameInProgress) return false;
+    if (!_frameManager.setFixedTimestepRatio(numerator, denominator)) return false;
+    _pendingNativeFixedTimestep.reset();
+    return true;
 }
 
 void GameLoop::setTimeScale(float scale) {

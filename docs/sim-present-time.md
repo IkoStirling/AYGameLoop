@@ -93,6 +93,11 @@ PR / design review 必须能回答：
 
 ## 5. 以后再加什么（不要现在做）
 
+2026-10-07：标准 Host 的软件浮点固定步已经接入。`setFixedTimestepRatio`
+从整数比率构造 DetFloat32，默认 1/60；FrameContext/SimTickEvent 携带
+`fixedStep`，Entity 直接 typed dispatch。旧 float 设置是显式 native 输入。
+数值输入确定性不等于墙钟调度或物理后端确定性，详见 [design.md](../design.md) §3.0。
+
 | 以后 | 现在 |
 |------|------|
 | DET fixed-point Sim 世界 / `ISimClock` 完整抽象 | **已有** `SimTickEvent` + `IGameLoop::getSimTick()` 作为共享时间锚点 |
@@ -104,4 +109,4 @@ Scene / Save / Network / Replay 订阅 `ayt::game::SimTickEvent`（每 fixed 步
 
 ## 6. 一句话
 
-**改真相 → `fixedUpdate`；画画/UI → `update`；暂停靠 `timeScale`；确定性数学以后再说。**
+**改真相 → 固定 Sim tick；画画/UI → `update`；暂停靠 `timeScale`；新权威数值显式使用软件 binary32 配置。**

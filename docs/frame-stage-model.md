@@ -49,6 +49,14 @@ It must not read mutable ECS or subsystem state concurrently.
 
 ## Clock domains
 
+The standard loop constructs the fixed numeric input with software binary32
+arithmetic (default ratio 1/60). All fixed phases and committed SimTickEvent
+values carry the same optional FixedTimestep descriptor. The Entity adapter
+dispatches its DetFloat32 value directly; legacy subsystems still receive a
+native bit-copy. Rational changes are rejected inside frames, while legacy float
+changes take effect at the next frame boundary. Wall-clock scheduling remains
+native and does not constitute a lockstep input gate.
+
 Clock selection is independent of phase selection.
 
 - `Game`: affected by pause and `timeScale`. The game accumulator receives
